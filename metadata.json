@@ -1,0 +1,6 @@
+{
+  "name": "LSS6 Solar Land & PMU Feasibility Analyzer",
+  "description": "Locate suitable land, compute exact PMU/PPU distance, terrain, sunlight, and grid interconnection feasibility analysis for LSS6-Hybrid and Package 3 Solar-Only (33kV) designated nodes across Peninsular Malaysia in accordance with Energy Commission (ST) RFP guidelines.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
