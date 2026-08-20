@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { PMUNode, LandParcel } from '../types';
-import { Zap, MapPin, Sun, Compass, ShieldAlert, CheckCircle2, ChevronRight, FileText, ArrowUpRight, DollarSign, Mail } from 'lucide-react';
+import { Zap, MapPin, Sun, Compass, ShieldAlert, CheckCircle2, ChevronRight, FileText, ArrowUpRight, DollarSign, Mail, FileDown } from 'lucide-react';
 import { TnbEnquiryLetterModal } from './TnbEnquiryLetterModal';
+import { generateRfpSubmissionPdfReport } from '../utils/rfpPdfReport';
 
 interface PMUNodeDetailsProps {
   node: PMUNode | null;
@@ -302,7 +303,7 @@ export const PMUNodeDetails: React.FC<PMUNodeDetailsProps> = ({
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex items-center justify-between gap-2 pt-1">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -313,13 +314,28 @@ export const PMUNodeDetails: React.FC<PMUNodeDetailsProps> = ({
                     + Compare
                   </button>
                   <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        await generateRfpSubmissionPdfReport(land, node);
+                      } catch (err) {
+                        console.error('Failed to export RFP PDF:', err);
+                      }
+                    }}
+                    className="px-2.5 py-1.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 text-xs font-bold border border-amber-300 transition-colors flex items-center gap-1 cursor-pointer"
+                    title="Export 8-Page RFP Submission Summary PDF"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-amber-700" />
+                    <span>RFP PDF</span>
+                  </button>
+                  <button
                     onClick={(e) => {
                       e.stopPropagation();
                       onAnalyzeFeasibility(land, node);
                     }}
-                    className="flex-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black px-3 py-1.5 rounded text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                    className="flex-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black px-3 py-1.5 rounded text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer min-w-[150px]"
                   >
-                    <FileText className="w-3.5 h-3.5" /> Generate Detailed Feasibility Study
+                    <FileText className="w-3.5 h-3.5" /> Detailed Study
                   </button>
                 </div>
               </div>

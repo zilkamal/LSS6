@@ -27,6 +27,9 @@ export interface LandParcel {
   pmuId: string;
   name: string;
   
+  // Data Provenance & Verification Status (C-06)
+  dataProvenance?: 'SYNTHETIC' | 'USER_ENTERED' | 'VERIFIED_JUPEM';
+
   // 1. Cadastral & Legal Title Details
   lotNumber: string; // e.g. Lot 1482, Lot 8921/A
   mukim: string; // e.g. Mukim Sidam Kiri, Mukim Chemor
@@ -83,8 +86,8 @@ export interface LandParcel {
 
   // 3. Terrain & Topography
   elevationDEM: number; // meters above sea level
-  terrainSlope: number; // degrees
-  terrainCategory: 'Flat (<3°)' | 'Gentle Slope (3-8°)' | 'Hilly (8-15°)' | 'Steep (>15°)';
+  terrainSlope: number | null; // degrees (null if not surveyed per C-07)
+  terrainCategory: 'Flat (<3°)' | 'Gentle Slope (3-8°)' | 'Hilly (8-15°)' | 'Steep (>15°)' | 'Unsurveyed';
   isSteepTerrainExcluded: boolean; // >15 deg
   floodRisk: 'Low' | 'Moderate' | 'High';
 
@@ -216,8 +219,8 @@ export interface CustomLocationAnalysis {
   ghiKwhM2Year: number;
   ghiKwhM2Day: number;
   maxSolarCapacityMW: number;
-  terrainSlope: number;
-  terrainCategory: 'Flat (<3°)' | 'Gentle Slope (3-8°)' | 'Hilly (8-15°)' | 'Steep (>15°)';
+  terrainSlope: number | null;
+  terrainCategory: 'Flat (<3°)' | 'Gentle Slope (3-8°)' | 'Hilly (8-15°)' | 'Steep (>15°)' | 'Unsurveyed';
   interconnectionCostMyr: number;
   pvCapExMyr: number;
   bessCapExMyr: number;
@@ -242,6 +245,7 @@ export interface FeasibilityReportData {
   areaAcres: number;
   areaHectares: number;
   maxCapacityMW: number;
+  dataProvenance?: 'SYNTHETIC' | 'USER_ENTERED' | 'VERIFIED_JUPEM';
   lotNumber: string;
   mukim: string;
   district: string;
@@ -254,7 +258,7 @@ export interface FeasibilityReportData {
   ndviVegetationIndex: number;
   distanceToPermanentForestReserveKm: number;
   isForestOverlay: boolean;
-  terrainSlopeDeg: number;
+  terrainSlopeDeg: number | null;
   terrainCategory: string;
   floodRisk: string;
   floodRiskLevel?: string;

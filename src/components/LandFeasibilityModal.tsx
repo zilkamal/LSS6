@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { LandParcel, PMUNode, FeasibilityReportData } from '../types';
+import { calculateProjectFinance } from '../utils/projectFinance';
+import { generateRfpSubmissionPdfReport } from '../utils/rfpPdfReport';
 import { TopographicalRiskVisualizer } from './TopographicalRiskVisualizer';
 import { TnbEnquiryLetterModal } from './TnbEnquiryLetterModal';
 import { EditLandDetailsModal } from './EditLandDetailsModal';
+import { GridSchematicViewer } from './GridSchematicViewer';
 import {
   X,
   Zap,
@@ -17,6 +20,7 @@ import {
   FileText,
   BarChart3,
   Download,
+  FileDown,
   Building,
   TrendingUp,
   Droplets,
@@ -355,11 +359,12 @@ export const LandFeasibilityModal: React.FC<LandFeasibilityModalProps> = ({
 }) => {
   if (!land || !pmuNode) return null;
 
-  const [activeReportTab, setActiveReportTab] = useState<'ai' | 'map' | 'cadastral' | 'flood' | 'solar' | 'terrain' | 'environment' | 'finance' | 'ivv'>('ivv');
+  const [activeReportTab, setActiveReportTab] = useState<'ai' | 'map' | 'cadastral' | 'flood' | 'solar' | 'terrain' | 'environment' | 'finance' | 'ivv' | 'schematic'>('ivv');
   const [loadingAiReport, setLoadingAiReport] = useState<boolean>(false);
   const [aiData, setAiData] = useState<FeasibilityReportData['aiReport'] | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+  const [isExportingRfpPdf, setIsExportingRfpPdf] = useState<boolean>(false);
   const [mapOverlayImage, setMapOverlayImage] = useState<string | null>(null);
   const [isTnbLetterOpen, setIsTnbLetterOpen] = useState<boolean>(false);
   const [customLand, setCustomLand] = useState<LandParcel | null>(null);
@@ -380,6 +385,7 @@ export const LandFeasibilityModal: React.FC<LandFeasibilityModalProps> = ({
 
   const [showCapexAdjuster, setShowCapexAdjuster] = useState<boolean>(false);
   const [capexCopiedAlert, setCapexCopiedAlert] = useState<boolean>(false);
+  const [userBidTariff, setUserBidTariff] = useState<number>(land.bidPriceMyrKwh ?? (isPackage3 ? 0.2380 : 0.4331));
 
   const [capexInputs, setCapexInputs] = useState({
     pvUnitCost: 2.65, // RM Million per MWp
@@ -404,6 +410,7 @@ export const LandFeasibilityModal: React.FC<LandFeasibilityModalProps> = ({
     if (land && pmuNode) {
       const is275 = pmuNode.voltage === '275kV';
       const isPkg3 = pmuNode.voltage === '33kV' || land.packageSuitability?.includes('Package 3') || (land.bessEnergyMWh === 0 && land.bessPowerMW === 0);
+      setUserBidTariff(land.bidPriceMyrKwh ?? (isPkg3 ? 0.2380 : 0.4331));
       setCapexInputs({
         pvUnitCost: 2.65,
         pvLumpSum: '',
@@ -473,12 +480,35 @@ export const LandFeasibilityModal: React.FC<LandFeasibilityModalProps> = ({
     Number(capexInputs.idcRatePct) !== 5.25 ||
     Number(capexInputs.debtArrangementFeePct) !== 1.0;
 
-  // Dynamic Financial Metrics recalculation
-  const baseCapExBenchmark = 335.17;
-  const capexScaleFactor = exactTotalCapEx / baseCapExBenchmark;
-  const dynamicLCOE = Math.round((0.3764 * capexScaleFactor) * 10000) / 10000;
-  const dynamicIRR = Math.max(3.5, Math.round((12.0 / Math.pow(capexScaleFactor, 0.65)) * 10) / 10);
-  const dynamicDSCR = Math.max(1.10, Math.round((1.43 / capexScaleFactor) * 100) / 100);
+  // Dynamic Financial Metrics recalculation using genuine 21-year Project Finance Cashflow Engine
+  const annualOpExBase = (
+    (land.maxCapacityMW || (isPackage3 ? 25 : 75)) * 0.045 +
+    (isPackage3 ? 0 : (land.bessEnergyMWh || 120)) * 0.012 +
+    (pvCap + bessCap + gridCap) * 0.0035 +
+    land.areaAcres * 0.0012 +
+    (isPackage3 ? 0.20 : 0.35) +
+    (isPackage3 ? 0.35 : (land.maxCapacityMW > 125 ? 3.0 : 1.0)) * 0.01
+  );
+
+  const dynamicFinance = calculateProjectFinance({
+    totalCapEx: exactTotalCapEx,
+    annualOpExBase,
+    annualNetExportMWh: land.estimatedAnnualMWh || 121604,
+    tariff: userBidTariff,
+  });
+
+  const dynamicLCOE = dynamicFinance.lcoe;
+  const dynamicIRR = dynamicFinance.equityIRR ?? (isPackage3 ? 12.5 : 12.0);
+  const dynamicDSCR = dynamicFinance.minDSCR ?? 1.43;
+  const dynamicAvgDSCR = dynamicFinance.avgDSCR ?? 1.65;
+  const dynamicPayback = dynamicFinance.paybackYears;
+  const dynamicAnnualCashflows = dynamicFinance.annualCashflows;
+
+  const clearsCFFloor = land.clearsCapacityFactorFloor !== undefined
+    ? land.clearsCapacityFactorFloor
+    : (land.capacityFactorYear21 !== undefined ? land.capacityFactorYear21 >= 16.0 : true);
+
+  const displayScore = clearsCFFloor ? land.overallScore : Math.min(40, land.overallScore);
 
   const handleResetCapEx = () => {
     const is275 = pmuNode.voltage === '275kV';
@@ -788,6 +818,23 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
     });
     return () => { isMounted = false; };
   }, [land, pmuNode]);
+
+  // Download Formatted 8-Page RFP Submission Summary PDF Report (with SLD Schematics)
+  const handleDownloadRfpPdfReport = async () => {
+    if (!activeLand || !pmuNode) return;
+    setIsExportingRfpPdf(true);
+
+    try {
+      await generateRfpSubmissionPdfReport(activeLand, pmuNode, {
+        bidTariffMyrKwh: userBidTariff,
+      });
+    } catch (error) {
+      console.error('Error generating RFP PDF:', error);
+      alert('An error occurred while generating the RFP submission report. Please try again.');
+    } finally {
+      setIsExportingRfpPdf(false);
+    }
+  };
 
   // Download PDF Feasibility Report Function
   const handleDownloadPdfReport = async () => {
@@ -1710,22 +1757,33 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
               {isCapExCustomized && <span className="bg-amber-950 text-amber-300 text-[9px] font-black px-1.5 py-0.2 rounded-full">CUSTOM</span>}
             </button>
             <button
+              onClick={handleDownloadRfpPdfReport}
+              disabled={isExportingRfpPdf}
+              className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black px-3.5 py-1.5 rounded text-xs transition-all shadow-md cursor-pointer border border-amber-400 disabled:opacity-50"
+              title="Generate comprehensive 8-page formatted RFP Submission Report with PMU Details, Cadastral Data, 21-Yr Cash Flow and Single Line Diagram (SLD) Schematics"
+            >
+              <FileDown className="w-4 h-4 text-slate-950" />
+              {isExportingRfpPdf ? 'Compiling 8-Page RFP PDF...' : 'Export RFP Submission Summary (PDF)'}
+            </button>
+            <button
               onClick={handleDownloadPdfReport}
               disabled={isExportingPdf}
-              className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1.5 rounded text-xs transition-colors shadow-xs cursor-pointer"
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold px-3 py-1.5 rounded text-xs transition-colors shadow-xs cursor-pointer border border-slate-700"
             >
-              <Download className="w-4 h-4" />
-              {isExportingPdf ? 'Generating PDF...' : 'Download Full Study (PDF)'}
+              <Download className="w-4 h-4 text-amber-400" />
+              {isExportingPdf ? 'Generating...' : 'Full Study PDF'}
             </button>
             <button
               onClick={() => window.print()}
               className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold px-3 py-1.5 rounded text-xs transition-colors border border-slate-700"
             >
-              <Printer className="w-4 h-4 text-amber-400" /> Print Full Study
+              <Printer className="w-4 h-4 text-amber-400" /> Print
             </button>
             <div className="bg-slate-800 border border-slate-700 px-3 py-1.5 rounded text-center font-mono">
               <span className="text-[10px] text-slate-400 block font-bold uppercase">AI Suitability Score</span>
-              <span className="text-base font-black text-emerald-400">{land.overallScore} / 100</span>
+              <span className={`text-base font-black ${clearsCFFloor ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {displayScore} / 100
+              </span>
             </div>
             <button
               onClick={onClose}
@@ -1735,6 +1793,26 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
             </button>
           </div>
         </div>
+
+        {/* MANDATORY TENDER DISCLAIMER BANNER */}
+        <div className="bg-amber-500/10 border-b border-amber-300 px-6 py-2.5 flex items-start gap-2.5 text-xs text-amber-950 font-sans print:bg-white print:border-b-2 print:border-slate-800">
+          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <div className="leading-snug">
+            <strong className="text-amber-900 font-mono uppercase tracking-wider text-[10.5px]">MANDATORY NOTICE: </strong>
+            <span>INDICATIVE SCREENING OUTPUT — NOT A FEASIBILITY STUDY. Financial metrics are modelled estimates. Cadastral, topographical and hydrological data are unverified. Independent survey and financial due diligence required before tender submission.</span>
+          </div>
+        </div>
+
+        {/* CLAUSE 11.1.1(b) CAPACITY FACTOR FLOOR FAILURE ALERT */}
+        {!clearsCFFloor && (
+          <div className="bg-rose-100 border-b border-rose-300 px-6 py-2.5 flex items-start gap-2.5 text-xs text-rose-950 font-sans">
+            <AlertTriangle className="w-4 h-4 text-rose-700 shrink-0 mt-0.5" />
+            <div>
+              <strong className="text-rose-900 font-mono uppercase tracking-wider text-[10.5px]">FAILED Clause 11.1.1(b) Minimum Capacity Factor Floor (16.0%): </strong>
+              <span>Year 21 Capacity Factor is {land.capacityFactorYear21?.toFixed(2) ?? '15.8'}%, below the mandatory RFP Clause 11.1.1(b) floor. Site suitability score is capped at {displayScore}/100 (Disqualified).</span>
+            </div>
+          </div>
+        )}
 
         {/* Modal Nav Tabs - Hidden when printing */}
         <div className="bg-slate-100 border-b border-slate-200 px-6 py-2 flex items-center gap-2 overflow-x-auto text-xs font-mono print:hidden">
@@ -1808,7 +1886,15 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
               activeReportTab === 'finance' ? 'bg-amber-500 text-slate-950 shadow-xs' : 'text-slate-700 hover:bg-slate-200'
             }`}
           >
-            <DollarSign className="w-3.5 h-3.5" /> Grid Evacuation & Tariff
+            <DollarSign className="w-3.5 h-3.5 text-amber-600" /> Grid Evacuation & Tariff
+          </button>
+          <button
+            onClick={() => setActiveReportTab('schematic')}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded font-bold transition-all cursor-pointer ${
+              activeReportTab === 'schematic' ? 'bg-amber-500 text-slate-950 shadow-xs' : 'text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-600" /> Grid Schematics & SLD
           </button>
         </div>
 
@@ -2115,13 +2201,25 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="bg-slate-50 p-4 rounded border border-slate-200 space-y-3">
-                  <h5 className="font-bold text-slate-900 uppercase text-xs border-b pb-1">Land Identification</h5>
+                  <h5 className="font-bold text-slate-900 uppercase text-xs border-b pb-1 flex items-center justify-between">
+                    <span>Land Identification</span>
+                    {land.dataProvenance === 'SYNTHETIC' ? (
+                      <span className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-300 px-1.5 py-0.2 rounded font-mono">
+                        SYNTHETIC — PENDING JUPEM TITLE SEARCH
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-emerald-900 bg-emerald-100 border border-emerald-300 px-1.5 py-0.2 rounded font-mono">
+                        VERIFIED CADASTRAL DATA
+                      </span>
+                    )}
+                  </h5>
                   <div className="space-y-1.5 text-slate-700">
                     <div><strong>Lot Number:</strong> <span className="font-bold text-slate-900">{land.lotNumber}</span></div>
                     <div><strong>Mukim:</strong> {land.mukim}</div>
                     <div><strong>District & State:</strong> {land.district}, {land.state}</div>
                     <div><strong>Land Area:</strong> <span className="font-bold text-emerald-700">{land.areaHectares} Hectares</span> ({land.areaAcres} Acres)</div>
                     <div><strong>GPS Center:</strong> {land.lat}, {land.lng}</div>
+                    <div><strong>Data Provenance:</strong> <span className="font-mono text-slate-800">{land.dataProvenance || 'SYNTHETIC'}</span></div>
                   </div>
                 </div>
 
@@ -2444,8 +2542,12 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
                 </div>
                 <div className="bg-slate-50 p-4 rounded border border-slate-200">
                   <span className="text-[10px] font-bold text-slate-500 uppercase block">Slope Angle</span>
-                  <div className="text-2xl font-black text-amber-700">{land.terrainSlope}°</div>
-                  <span className="text-xs text-slate-500">{land.terrainCategory}</span>
+                  <div className="text-xl font-black text-amber-700">
+                    {land.terrainSlope !== null && land.terrainSlope !== undefined ? `${land.terrainSlope}°` : 'Not surveyed'}
+                  </div>
+                  <span className="text-xs text-slate-500">
+                    {land.terrainSlope !== null && land.terrainSlope !== undefined ? land.terrainCategory : 'Physical topographical survey required'}
+                  </span>
                 </div>
                 <div className="bg-slate-50 p-4 rounded border border-slate-200">
                   <span className="text-[10px] font-bold text-slate-500 uppercase block">NDVI Vegetation Index</span>
@@ -2614,6 +2716,158 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
                     <div className="text-sm font-bold text-indigo-700">RM {debtArrCap.toFixed(2)}M</div>
                     <span className="text-[9px] text-indigo-600 truncate block">{capexInputs.debtArrangementFeePct}% Arrangement Fee</span>
                   </div>
+                </div>
+              </div>
+
+              {/* Dynamic Bid Tariff Sensitivity Slider Control */}
+              <div className="bg-slate-900 text-white p-4 rounded-lg border border-slate-800 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h5 className="text-amber-400 font-extrabold text-xs uppercase flex items-center gap-1.5 font-mono">
+                      <Sliders className="w-4 h-4 text-amber-400" />
+                      <span>Interactive RFP Bid Tariff Sensitivity Simulator</span>
+                    </h5>
+                    <p className="text-[11px] text-slate-300">
+                      Adjust your tender bid price to solve exact 21-year Equity IRR, DSCR profile, and debt covenants in real time.
+                    </p>
+                  </div>
+                  <div className="bg-slate-800 px-3 py-1.5 rounded border border-slate-700 text-right shrink-0">
+                    <span className="text-[10px] text-slate-400 block uppercase">Modeled Bid Tariff</span>
+                    <span className="text-base font-black text-emerald-400 font-mono">
+                      RM {userBidTariff.toFixed(4)} <span className="text-xs text-slate-300">/ kWh</span>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                    <span>RM 0.1500 / kWh (Competitive Floor)</span>
+                    <span className="font-bold text-amber-300">Selected: RM {userBidTariff.toFixed(4)}</span>
+                    <span>RM 0.6000 / kWh (Ceiling)</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.15"
+                    max="0.60"
+                    step="0.0025"
+                    value={userBidTariff}
+                    onChange={(e) => setUserBidTariff(parseFloat(e.target.value))}
+                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-400"
+                  />
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      onClick={() => setUserBidTariff(isPackage3 ? 0.2380 : 0.4331)}
+                      className="text-[10px] bg-slate-800 hover:bg-slate-700 text-amber-300 px-2 py-0.5 rounded border border-slate-700 font-mono cursor-pointer"
+                    >
+                      Reset to Benchmark ({isPackage3 ? 'RM 0.2380' : 'RM 0.4331'})
+                    </button>
+                    <button
+                      onClick={() => setUserBidTariff(dynamicLCOE)}
+                      className="text-[10px] bg-slate-800 hover:bg-slate-700 text-blue-300 px-2 py-0.5 rounded border border-slate-700 font-mono cursor-pointer"
+                    >
+                      Set to Exact PPA LCOE (RM {dynamicLCOE.toFixed(4)})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Key Solved Results at Current Tariff */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800 text-center font-mono">
+                  <div className="bg-slate-800/80 p-2 rounded">
+                    <span className="text-[9px] text-slate-400 uppercase block">Equity IRR (Post-Tax)</span>
+                    <span className="text-sm font-black text-amber-400">{dynamicIRR.toFixed(2)}%</span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2 rounded">
+                    <span className="text-[9px] text-slate-400 uppercase block">Min Senior DSCR</span>
+                    <span className={`text-sm font-black ${dynamicDSCR >= 1.25 ? 'text-emerald-400' : dynamicDSCR >= 1.10 ? 'text-amber-400' : 'text-rose-400'}`}>
+                      {dynamicDSCR.toFixed(2)}×
+                    </span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2 rounded">
+                    <span className="text-[9px] text-slate-400 uppercase block">Average DSCR</span>
+                    <span className="text-sm font-black text-emerald-400">{dynamicAvgDSCR.toFixed(2)}×</span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2 rounded">
+                    <span className="text-[9px] text-slate-400 uppercase block">Equity Payback</span>
+                    <span className="text-sm font-black text-blue-400">
+                      {dynamicPayback !== null ? `${dynamicPayback.toFixed(1)} Yrs` : '> 21 Yrs'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Comprehensive 21-Year Annual Cash Flow Statement */}
+              <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden space-y-0">
+                <div className="bg-slate-100 px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h5 className="font-extrabold text-slate-900 uppercase text-xs flex items-center gap-1.5 font-mono">
+                      <BarChart3 className="w-4 h-4 text-emerald-600" />
+                      <span>21-Year Non-Recourse Project Finance Cash Flow Statement</span>
+                    </h5>
+                    <p className="text-[11px] text-slate-500 font-sans">
+                      Standard Malaysian Project Finance schedule incorporating 75:25 senior debt gearing, 15-year tenor @ 5.25% profit rate, GITA 100% solar tax allowances, and year-by-year degradation.
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded border border-emerald-300 font-mono">
+                    All Values in RM Million
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto max-h-[420px] divide-y divide-slate-200">
+                  <table className="w-full text-left font-mono text-[10.5px]">
+                    <thead className="bg-slate-900 text-slate-200 sticky top-0 z-10 text-[10px]">
+                      <tr>
+                        <th className="py-2 px-2.5 font-bold">Yr</th>
+                        <th className="py-2 px-2 font-bold text-right">Net MWh</th>
+                        <th className="py-2 px-2 font-bold text-right">Tariff (RM)</th>
+                        <th className="py-2 px-2 font-bold text-right">Revenue</th>
+                        <th className="py-2 px-2 font-bold text-right">OpEx</th>
+                        <th className="py-2 px-2 font-bold text-right text-amber-300">EBITDA</th>
+                        <th className="py-2 px-2 font-bold text-right">Debt Service</th>
+                        <th className="py-2 px-2 font-bold text-right">Tax (24%)</th>
+                        <th className="py-2 px-2 font-bold text-right">CFADS</th>
+                        <th className="py-2 px-2 font-bold text-center">DSCR</th>
+                        <th className="py-2 px-2.5 font-bold text-right text-emerald-300">Equity FCF</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {dynamicAnnualCashflows.map((row) => (
+                        <tr key={row.year} className="hover:bg-amber-50/40 transition-colors">
+                          <td className="py-1.5 px-2.5 font-black text-slate-900 bg-slate-50">Y{row.year}</td>
+                          <td className="py-1.5 px-2 text-right text-slate-700">{Math.round(row.energyMWh).toLocaleString()}</td>
+                          <td className="py-1.5 px-2 text-right text-slate-600">{userBidTariff.toFixed(4)}</td>
+                          <td className="py-1.5 px-2 text-right font-bold text-slate-900">{row.revenueMyr.toFixed(2)}</td>
+                          <td className="py-1.5 px-2 text-right text-slate-600">({row.opexMyr.toFixed(2)})</td>
+                          <td className="py-1.5 px-2 text-right font-bold text-amber-800 bg-amber-50/30">{row.ebitdaMyr.toFixed(2)}</td>
+                          <td className="py-1.5 px-2 text-right text-slate-700">
+                            {row.debtServiceMyr > 0 ? `(${row.debtServiceMyr.toFixed(2)})` : '—'}
+                          </td>
+                          <td className="py-1.5 px-2 text-right text-slate-600">
+                            {row.taxMyr > 0 ? `(${row.taxMyr.toFixed(2)})` : '0.00*'}
+                          </td>
+                          <td className="py-1.5 px-2 text-right text-slate-700">{row.cfadsMyr.toFixed(2)}</td>
+                          <td className="py-1.5 px-2 text-center font-bold">
+                            {row.dscr !== null ? (
+                              <span className={row.dscr >= 1.25 ? 'text-emerald-700' : row.dscr >= 1.10 ? 'text-amber-700' : 'text-rose-700'}>
+                                {row.dscr.toFixed(2)}×
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">N/A</span>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2.5 text-right font-black text-emerald-800 bg-emerald-50/40">
+                            {row.equityCFMyr.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="p-3 bg-slate-50 border-t border-slate-200 text-[10px] text-slate-500 flex flex-wrap items-center justify-between gap-2 font-sans">
+                  <span>* Corporate tax is shielded in early years by MIDA Green Investment Tax Allowance (GITA 100%) and accelerated capital allowances.</span>
+                  <span className="font-mono font-bold text-slate-700">
+                    Total 21-Yr Equity Distributions: RM {dynamicAnnualCashflows.reduce((acc, r) => acc + r.equityCFMyr, 0).toFixed(2)}M
+                  </span>
                 </div>
               </div>
             </div>
@@ -2963,6 +3217,16 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* TAB 9: Grid Interconnection Schematics & Single Line Diagram (SLD) */}
+          {activeReportTab === 'schematic' && (
+            <div className="space-y-6">
+              <GridSchematicViewer
+                land={activeLand}
+                pmuNode={pmuNode}
+              />
             </div>
           )}
           </div>
@@ -3344,12 +3608,20 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
           </span>
           <div className="flex items-center gap-2">
             <button
+              onClick={handleDownloadRfpPdfReport}
+              disabled={isExportingRfpPdf}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black transition-all shadow-md cursor-pointer border border-amber-400 disabled:opacity-50"
+            >
+              <FileDown className="w-4 h-4 text-slate-950" />
+              {isExportingRfpPdf ? 'Compiling RFP PDF...' : 'Export RFP Submission Summary (PDF)'}
+            </button>
+            <button
               onClick={handleDownloadPdfReport}
               disabled={isExportingPdf}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold transition-colors border border-slate-700 cursor-pointer"
             >
-              <Download className="w-4 h-4" />
-              {isExportingPdf ? 'Exporting PDF...' : 'Download Full Study (PDF)'}
+              <Download className="w-4 h-4 text-amber-400" />
+              {isExportingPdf ? 'Exporting...' : 'Full Study PDF'}
             </button>
             <button
               onClick={() => window.print()}

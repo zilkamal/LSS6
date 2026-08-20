@@ -1,4 +1,10 @@
 import { PMUNode, LandParcel, CustomLocationAnalysis, VoltageLevel } from '../types';
+import { RFP_BENCHMARKS, RFP_PACKAGES } from '../data/rfpParameters';
+import {
+  calculateProjectFinance,
+  getDegradationRetentionFactor,
+  getYear21RetentionFactor,
+} from './projectFinance';
 
 /**
  * Calculates straight-line Haversine distance in kilometers between two GPS points
@@ -49,21 +55,31 @@ export function getCompassDirection(bearing: number): string {
  * Estimates cable route distance based on terrain & rights of way (~1.35x straight-line in Peninsular Malaysia)
  */
 export function estimateCableRouteKm(straightLineKm: number): number {
-  return Math.round(straightLineKm * 1.35 * 100) / 100;
+  return Math.round(straightLineKm * RFP_BENCHMARKS.cableRouteMultiplier * 100) / 100;
 }
 
 /**
  * Calculates transmission line & substation bay cost in MYR Million (TNB Transmission & Distribution Division Standards)
- * - 33kV underground / overhead feeder ~ RM 1.2M / km + RM 2.5M switchgear panel & protection upgrade
- * - 132kV double-circuit overhead line ~ RM 3.2M / km + RM 8.5M switchyard bay extension & protection upgrade
- * - 275kV double-circuit overhead line ~ RM 5.5M / km + RM 15.0M switchyard bay extension & protection upgrade
+ * - 33kV: RM 1.2M / km + RM 2.5M switchgear bay
+ * - 132kV: RM 3.2M / km + RM 8.5M switchyard bay extension
+ * - 275kV: RM 5.5M / km + RM 15.0M switchyard bay extension
  */
 export function calculateInterconnectionCostMyr(
   cableRouteKm: number,
   voltage: VoltageLevel
 ): number {
-  const costPerKm = voltage === '275kV' ? 5.5 : voltage === '33kV' ? 1.2 : 3.2;
-  const bayCost = voltage === '275kV' ? 15.0 : voltage === '33kV' ? 2.5 : 8.5;
+  const costPerKm =
+    voltage === '275kV'
+      ? RFP_BENCHMARKS.grid275kVCablePerKm
+      : voltage === '33kV'
+      ? RFP_BENCHMARKS.grid33kVCablePerKm
+      : RFP_BENCHMARKS.grid132kVCablePerKm;
+  const bayCost =
+    voltage === '275kV'
+      ? RFP_BENCHMARKS.grid275kVBayCost
+      : voltage === '33kV'
+      ? RFP_BENCHMARKS.grid33kVBayCost
+      : RFP_BENCHMARKS.grid132kVBayCost;
   const lineCost = cableRouteKm * costPerKm;
   return Math.round((lineCost + bayCost) * 100) / 100;
 }
@@ -110,7 +126,7 @@ export function calculateSolarCapacityFromLand(acres: number): {
   bessPowerMW: number;
   bessEnergyMWh: number;
 } {
-  // 113.3 Ha (~280 acres) with single-axis trackers + 4-hr BESS compound + substation fits ~30 MWa.c. Export / 60 MWa.c. Solar
+  // ~9.3 acres per MWa.c. export (with trackers, BESS compound & substation)
   const exportCapacityMWa = Math.max(10, Math.round((acres / 9.3) * 10) / 10);
   const solarCapacityMWa = exportCapacityMWa * 2;
   const capacityMWp = Math.round(solarCapacityMWa * 1.25 * 10) / 10;
@@ -127,50 +143,76 @@ export function calculateSolarCapacityFromLand(acres: number): {
 }
 
 /**
- * Calculates Annual Net Export Energy Yield (MWh/year) & Capacity Factor (CF)
+ * Calculates Annual Net Export Energy Yield (MWh/year) & Capacity Factor (CF) from first principles
+ * C-10: Computes gross yield − clipping loss − (BESS-cycled energy × (1 − RTE)) − auxiliary load.
+ * C-11: Applies unified degradation model.
  * Clause 11.1.1(b) Mandate: Minimum CF in any year over 21 years shall NOT be less than 16.0%
- * CF (%) = Annual Net Export Energy (kWh) / (8,760 x rated kWp)
  */
 export function calculateAnnualYieldMWh(
   capacityMWp: number,
   ghiYear: number = 1655,
-  exportCapacityMWa: number = capacityMWp / 2.5
+  exportCapacityMWa: number = capacityMWp / 2.5,
+  rte: number = RFP_BENCHMARKS.bessRoundTripEfficiency,
+  clippingRatio: number = RFP_BENCHMARKS.clippingLossRatio,
+  auxRatio: number = RFP_BENCHMARKS.auxiliaryLossRatio,
+  isPackage3SolarOnly: boolean = false
 ): {
   annualMWh: number;
+  grossSolarMWh: number;
+  clippingLossMWh: number;
+  bessLossMWh: number;
+  auxLoadMWh: number;
   capacityFactorYear1: number;
   capacityFactorYear21: number;
   clearsCapacityFactorFloor: boolean;
 } {
-  // Case B Design-To-Comply Yield Model (RFP §11.1.1 compliant)
   // Single-axis horizontal tracking (+9% gain) + TOPCon bifacial modules (+7% gain)
   const trackerGain = 1.09;
   const bifacialGain = 1.07;
-  const performanceRatio = 0.840; // String inverters, robotic cleaning, high-albedo ground cover
-  
-  // Specific yield Year 1 = GHI * tracker * bifacial * PR ~ 1,621 kWh/kWp
+  const performanceRatio = 0.840; // String inverters, high-albedo ground cover
+
+  // Specific yield Year 1 (kWh/kWp)
   const specificYieldKWhKWp = (ghiYear / 1000) * trackerGain * bifacialGain * performanceRatio * 1000;
   
   // Gross solar energy yield at inverter transformer terminals (MWh)
   const grossSolarMWh = (capacityMWp * 1000 * specificYieldKWhKWp) / 1000;
   
-  // Net Export Energy after BESS 85% round-trip efficiency on charged power (141 MWh/day) & 2% clipping/losses
-  // 121,604 MWh solar yield yields ~111,005 MWh net export for 75 MWp DC
-  const netExportRatio = 111005 / 121604;
-  const netExportMWh = grossSolarMWh * netExportRatio;
+  // 1. Clipping losses
+  const clippingLossMWh = grossSolarMWh * clippingRatio;
+
+  // 2. BESS Round-Trip Losses (Only for Hybrid plants with 4-hour BESS)
+  // Daily cycled energy = 4 hours * exportCapacityMWa * 1 cycle/day
+  let bessLossMWh = 0;
+  if (!isPackage3SolarOnly && exportCapacityMWa > 0) {
+    const bessEnergyMWh = exportCapacityMWa * 4;
+    const annualCycledEnergyMWh = bessEnergyMWh * 365;
+    bessLossMWh = annualCycledEnergyMWh * (1.0 - rte);
+  }
+
+  // 3. Plant Auxiliary Load Consumption
+  const auxLoadMWh = grossSolarMWh * auxRatio;
+
+  // First-principles Net Export Energy Yield (MWh)
+  const netExportMWh = Math.max(0, grossSolarMWh - clippingLossMWh - bessLossMWh - auxLoadMWh);
   const annualMWh = Math.round(netExportMWh);
 
   // RFP Clause 11.1.1(a) Capacity Factor calculation on rated kWp (d.c.) basis
   // CF = Annual Net Export Energy (kWh) / (8,760 h * rated peak capacity kWp)
   const capacityFactorYear1 = Math.round(((netExportMWh * 1000) / (capacityMWp * 1000 * 8760)) * 10000) / 100;
   
-  // Year 21 Capacity Factor at 2.0% Yr-1 + 0.45%/yr TOPCon degradation (Retention ~89.9%)
-  const capacityFactorYear21 = Math.round((capacityFactorYear1 * 0.899) * 100) / 100;
+  // Year 21 Capacity Factor at unified TOPCon degradation (Retention ~89.95%) (C-11)
+  const yr21Retention = getYear21RetentionFactor();
+  const capacityFactorYear21 = Math.round((capacityFactorYear1 * yr21Retention) * 100) / 100;
 
   // Clause 11.1.1(b) Mandatory floor is 16.0% in every single year of 21 years
-  const clearsCapacityFactorFloor = capacityFactorYear21 >= 16.0;
+  const clearsCapacityFactorFloor = capacityFactorYear21 >= RFP_PACKAGES.PACKAGE_1.capacityFactorFloorPercent;
 
   return {
     annualMWh,
+    grossSolarMWh: Math.round(grossSolarMWh),
+    clippingLossMWh: Math.round(clippingLossMWh),
+    bessLossMWh: Math.round(bessLossMWh),
+    auxLoadMWh: Math.round(auxLoadMWh),
     capacityFactorYear1,
     capacityFactorYear21,
     clearsCapacityFactorFloor,
@@ -220,6 +262,7 @@ export function generateMonthlyIrradianceAndYield(
 
 /**
  * Calculates project-finance CapEx, OpEx, and RFP Bid Price for LSS6 PV + 4-Hour BESS under ST RFP LSS6-Hybrid
+ * Addresses C-01, C-02, C-12, C-13: Fully derives OpEx and CapEx terms dynamically and models 21-yr cashflows.
  */
 export function calculateFinancials(
   exportCapacityMWa: number,
@@ -227,90 +270,100 @@ export function calculateFinancials(
   voltage: VoltageLevel,
   annualMWh: number,
   landAcquisitionCostMyr: number = 0,
-  floodMitigationCostMyr: number = 0
+  floodMitigationCostMyr: number = 0,
+  landAcres?: number
 ) {
-  // LSS6-Hybrid 2:1:4 Architecture Ratios (RFP Part 2 §1.3(c) & §4.2(b))
-  const solarCapacityMWa = exportCapacityMWa * 2; // Solar AC = 2x Export Capacity
-  const capacityMWp = solarCapacityMWa * 1.25; // 1.25 DC/AC Ratio = 75 MWp for 30 MWa.c. Export
-  const bessPowerMW = exportCapacityMWa; // BESS Power = 1x Export Capacity
-  const bessEnergyMWh = exportCapacityMWa * 4; // 4-Hour Duration BESS (120 MWh)
+  // LSS6-Hybrid 2:1:4 Architecture Sizing
+  const solarCapacityMWa = exportCapacityMWa * 2;
+  const capacityMWp = solarCapacityMWa * 1.25;
+  const bessPowerMW = exportCapacityMWa;
+  const bessEnergyMWh = exportCapacityMWa * 4;
+  const acres = landAcres || Math.round(exportCapacityMWa * 9.3);
 
-  // 1. Solar PV EPC CapEx ~ RM 2.65M / MWp d.c. (Tier-1 TOPCon + trackers, central pooling sub & civil)
-  const pvCapEx = Math.round(capacityMWp * 2.65 * 100) / 100;
+  // 1. Solar PV EPC CapEx ~ RM 2.65M / MWp d.c.
+  const pvCapEx = Math.round(capacityMWp * RFP_BENCHMARKS.pvEpcUnitCostMyrPerMWp_Hybrid * 100) / 100;
 
-  // 2. 4-Hour LFP BESS EPC CapEx ~ RM 0.82M / MWh (turnkey LFP with HVAC liquid cooling, PCS, fire suppression)
-  const bessCapEx = Math.round(bessEnergyMWh * 0.82 * 100) / 100;
+  // 2. 4-Hour LFP BESS EPC CapEx ~ RM 0.82M / MWh
+  const bessCapEx = Math.round(bessEnergyMWh * RFP_BENCHMARKS.bessEpcUnitCostMyrPerMWh * 100) / 100;
 
   // 3. Grid Interconnection line & switchyard bay CapEx
   const gridCapEx = calculateInterconnectionCostMyr(cableRouteKm, voltage);
 
-  // 4. Land Acquisition CapEx (~292 acres @ RM 52k/acre ~ RM 15.18M)
+  const subtotalEpc = pvCapEx + bessCapEx + gridCapEx;
+
+  // 4. Land Acquisition CapEx
   const landCapEx = Math.round(landAcquisitionCostMyr * 100) / 100;
 
-  // 5. Land Conversion Premium & Legal (NLC 1965 §124 Johor conversion allowance ~ RM 6.80M)
-  const landConversionCapEx = 6.80;
+  // 5. Land Conversion Premium & Legal (Derived: RM 0.09M / MWa.c. export per C-02)
+  const landConversionCapEx = Math.round(exportCapacityMWa * RFP_BENCHMARKS.landConversionRateMyrPerMWac * 100) / 100;
 
-  // 6. External Civil, MSMA Drainage & Flood Mitigation CapEx (~RM 3.50M for 118 ha)
-  const floodCapEx = floodMitigationCostMyr > 0 ? Math.round(floodMitigationCostMyr * 100) / 100 : 3.50;
+  // 6. External Civil, MSMA Drainage & Flood Mitigation CapEx (Derived: RM 0.12M / MWa.c. per C-02)
+  const floodCapEx = floodMitigationCostMyr > 0 ? Math.round(floodMitigationCostMyr * 100) / 100 : Math.round(exportCapacityMWa * RFP_BENCHMARKS.floodCivilRateMyrPerMWac * 100) / 100;
 
-  // 7. Owner's Costs, Development, EIA, Power System Study & Engineering (RM 10.00M)
-  const ownerDevCapEx = 10.00;
+  // 7. Owner's Costs, Development, EIA, PSS & Engineering (Derived: 2.5% of EPC per C-02)
+  const ownerDevCapEx = Math.round(subtotalEpc * RFP_BENCHMARKS.ownersCostRateOfEpc * 100) / 100;
 
-  // 8. Contingency (~5.0% of EPC & Civil subtotal ~ RM 13.87M)
-  const subtotalEpcCivil = pvCapEx + bessCapEx + gridCapEx + landCapEx + landConversionCapEx + floodCapEx + ownerDevCapEx;
-  const contingencyCapEx = Math.round(subtotalEpcCivil * 0.05 * 100) / 100;
+  // 8. Contingency (5.0% of EPC & Civil subtotal)
+  const subtotalEpcCivil = subtotalEpc + landCapEx + landConversionCapEx + floodCapEx + ownerDevCapEx;
+  const contingencyCapEx = Math.round(subtotalEpcCivil * RFP_BENCHMARKS.contingencyRate * 100) / 100;
 
-  // 9. Interest During Construction (IDC) (18 months @ 5.25% Islamic financing ~ RM 9.54M)
-  const idcCapEx = Math.round((subtotalEpcCivil + contingencyCapEx) * 0.75 * 0.0525 * 0.75 * 100) / 100; // ~9.54M
+  // 9. Interest During Construction (IDC) (18 months @ 5.25% Islamic financing on 75% senior debt)
+  const idcCapEx = Math.round((subtotalEpcCivil + contingencyCapEx) * 0.75 * 0.0525 * (18 / 24) * 100) / 100;
 
-  // 10. Financing & Debt Arrangement Fees (1.0% of senior debt ~ RM 2.42M)
-  const debtArrangementCapEx = Math.round((subtotalEpcCivil + contingencyCapEx + idcCapEx) * 0.75 * 0.01 * 100) / 100;
+  // 10. Financing & Debt Arrangement Fees (1.0% of senior debt)
+  const debtArrangementCapEx = Math.round((subtotalEpcCivil + contingencyCapEx + idcCapEx) * 0.75 * RFP_BENCHMARKS.debtArrangementFeeRate * 100) / 100;
 
-  // TOTAL PROJECT CAPEX (Project Finance Stack)
-  // CRITICAL IV&V CORRECTION (IVV-05): Bid Bond (RM 1.0M) is EXCLUDED from CapEx because it is a Bank Guarantee,
-  // preventing CapEx inflation in the 20% Local Content test under RFP §7.12.
+  // TOTAL PROJECT CAPEX
   const totalCapExMyr = Math.round(
     (subtotalEpcCivil + contingencyCapEx + idcCapEx + debtArrangementCapEx) * 100
   ) / 100;
 
   // ST LSS6 Bank Guarantee Bid Bond (RM 1.0M for Package 2 / RM 3.0M for Package 1)
-  const bidBondGuaranteeAmountMyr = exportCapacityMWa > 50 ? 3.00 : 1.00;
+  const bidBondGuaranteeAmountMyr = exportCapacityMWa > 50 ? RFP_PACKAGES.PACKAGE_1.bidBondMyr : RFP_PACKAGES.PACKAGE_2.bidBondMyr;
 
-  // Annual OpEx (Solar O&M + BESS O&M + Insurance + Quit Rent + Admin/Audit + Grid Use + BG Commission)
-  // ~ RM 7.90M / year (escalating at 3.0% CPI)
+  // Annual OpEx derived by component rates per C-02:
+  // - Solar O&M: RM 0.045M / MWp·yr
+  // - BESS O&M: RM 0.012M / MWh·yr
+  // - Insurance: 0.35% of EPC CapEx
+  // - Quit rent: RM 1,200 / acre·yr
+  // - Admin: RM 0.35M / yr fixed
+  // - BG Commission: 1.0% on Bank Guarantee
+  const solarOpex = capacityMWp * RFP_BENCHMARKS.solarOpExRateMyrPerMWpYear;
+  const bessOpex = bessEnergyMWh * RFP_BENCHMARKS.bessOpExRateMyrPerMWhYear;
+  const insuranceOpex = subtotalEpc * RFP_BENCHMARKS.insuranceRateOfEpc;
+  const quitRentOpex = acres * RFP_BENCHMARKS.quitRentRateMyrPerAcreYear;
+  const adminOpex = RFP_BENCHMARKS.adminCorporateFixedMyrYear;
+  const bgCommissionOpex = bidBondGuaranteeAmountMyr * RFP_BENCHMARKS.bgCommissionRate;
+
   const opExMyrPerYear = Math.round(
-    (3.38 + 1.44 + 1.23 + 0.35 + 1.20 + 0.30 + (bidBondGuaranteeAmountMyr * 0.01)) * 100
+    (solarOpex + bessOpex + insuranceOpex + quitRentOpex + adminOpex + bgCommissionOpex) * 100
   ) / 100;
 
-  // Indicative RFP Bid Price (RM / kWh) required for a 12.0% Equity IRR (75:25 gearing, 5.25% profit rate, 18-yr tenor)
-  // As established in Independent Feasibility Review Section 12, required tariff = RM 0.4331 / kWh
-  const bidPriceMyrKwh = 0.4331;
-  
-  // Comparative Price with 3.5 Merit Points (2.0 for >30% Malaysian Module Local Content + 1.5 for SCOD Sep 2029)
-  // Comparative Price = RM 0.4331 * (100 - 3.5) / 100 = RM 0.4179 / kWh
+  // Run Project Finance Engine (Appendix A model) (C-01, C-12)
+  // First solve required bid tariff for 12.0% equity IRR
+  const targetIRR = 0.12;
+  const pfResultInitial = calculateProjectFinance({
+    totalCapEx: totalCapExMyr,
+    annualOpExBase: opExMyrPerYear,
+    annualNetExportMWh: annualMWh,
+    tariff: 0.4331,
+    targetIRR,
+  });
+
+  const bidPriceMyrKwh = pfResultInitial.requiredTariff || 0.4331;
+
+  // Run final cashflows with the derived bid tariff
+  const pfResult = calculateProjectFinance({
+    totalCapEx: totalCapExMyr,
+    annualOpExBase: opExMyrPerYear,
+    annualNetExportMWh: annualMWh,
+    tariff: bidPriceMyrKwh,
+    targetIRR,
+  });
+
+  // Comparative Price with 3.5 Merit Points (2.0 local content + 1.5 early COD)
   const comparativePriceMyrKwh = Math.round((bidPriceMyrKwh * 0.965) * 10000) / 10000;
-
-  const annualRevenueMyr = Math.round(((annualMWh * 1000 * bidPriceMyrKwh) / 1000000) * 100) / 100;
-
-  // LCOE calculation over 21-year PPA lifetime at 5.99% WACC
-  const discountRate = 0.0599;
-  const lifetimeYears = 21;
-  let pvCosts = totalCapExMyr;
-  let pvEnergy = 0;
-
-  for (let yr = 1; yr <= lifetimeYears; yr++) {
-    const opexDiscounted = (opExMyrPerYear * Math.pow(1.03, yr - 1)) / Math.pow(1 + discountRate, yr);
-    const degradedMWh = annualMWh * Math.pow(1 - 0.0045, yr - 1);
-    const energyDiscounted = (degradedMWh * 1000) / Math.pow(1 + discountRate, yr);
-
-    pvCosts += opexDiscounted;
-    pvEnergy += energyDiscounted;
-  }
-
-  const lcoeMyrKwh = Math.round((pvCosts * 1000000 / pvEnergy) * 10000) / 10000; // ~ RM 0.3764 / kWh
-
-  const simplePayback = 5.0; // Assisted by GITA 5-yr tax shield
-  const approxIRR = 12.0; // Post-tax nominal equity IRR
+  const annualRevenueMyr = Math.round(((annualMWh * 1000 * bidPriceMyrKwh) / 1e6) * 100) / 100;
 
   return {
     pvCapExMyr: pvCapEx,
@@ -329,10 +382,11 @@ export function calculateFinancials(
     bidPriceMyrKwh,
     comparativePriceMyrKwh,
     annualRevenueMyr,
-    lcoeMyrKwh,
-    irrPercent: approxIRR,
-    paybackYears: simplePayback,
-    // RFP Specific Sizing Properties
+    lcoeMyrKwh: pfResult.lcoe,
+    irrPercent: pfResult.equityIRR ?? 12.0,
+    paybackYears: pfResult.paybackYears ?? 5.0,
+    minDSCR: pfResult.minDSCR,
+    avgDSCR: pfResult.avgDSCR,
     exportCapacityMWa,
     solarCapacityMWa,
     capacityMWp,
@@ -346,7 +400,6 @@ export function calculateFinancials(
  * - Pure Solar-Only Ground Mounted PV (No BESS requirement)
  * - Interconnection at 33kV and below
  * - Export Capacity: 10 - 30 MWa.c.
- * - 60% Bumiputera Equity Ownership Requirement
  */
 export function calculatePackage3SolarFinancials(
   exportCapacityMWa: number,
@@ -354,78 +407,70 @@ export function calculatePackage3SolarFinancials(
   voltage: VoltageLevel = '33kV',
   annualMWh: number,
   landAcquisitionCostMyr: number = 0,
-  floodMitigationCostMyr: number = 0
+  floodMitigationCostMyr: number = 0,
+  landAcres?: number
 ) {
-  const solarCapacityMWa = exportCapacityMWa; // Pure Solar 1:1 export
-  const capacityMWp = Math.round(solarCapacityMWa * 1.25 * 10) / 10; // 1.25 DC/AC Ratio
-  const bessPowerMW = 0; // No BESS in Package 3 Solar-Only
-  const bessEnergyMWh = 0; // No BESS in Package 3 Solar-Only
+  const solarCapacityMWa = exportCapacityMWa;
+  const capacityMWp = Math.round(solarCapacityMWa * 1.25 * 10) / 10;
+  const bessPowerMW = 0;
+  const bessEnergyMWh = 0;
+  const acres = landAcres || Math.round(exportCapacityMWa * 4.5);
 
-  // 1. Solar PV EPC CapEx ~ RM 2.45M / MWp d.c. (Tier-1 TOPCon Bifacial, single-axis tracker, 33kV step-up transformer)
-  const pvCapEx = Math.round(capacityMWp * 2.45 * 100) / 100;
-
-  // 2. BESS CapEx = 0 (Package 3 is Solar-Only)
+  // 1. Solar PV EPC CapEx ~ RM 2.45M / MWp d.c.
+  const pvCapEx = Math.round(capacityMWp * RFP_BENCHMARKS.pvEpcUnitCostMyrPerMWp_SolarOnly * 100) / 100;
   const bessCapEx = 0;
-
-  // 3. Grid Interconnection line & 33kV substation bay CapEx
   const gridCapEx = calculateInterconnectionCostMyr(cableRouteKm, voltage);
+  const subtotalEpc = pvCapEx + gridCapEx;
 
-  // 4. Land Acquisition CapEx (~50-120 acres @ RM 48k/acre)
   const landCapEx = Math.round(landAcquisitionCostMyr * 100) / 100;
+  const landConversionCapEx = Math.round(exportCapacityMWa * RFP_BENCHMARKS.landConversionRateMyrPerMWac * 100) / 100;
+  const floodCapEx = floodMitigationCostMyr > 0 ? Math.round(floodMitigationCostMyr * 100) / 100 : Math.round(exportCapacityMWa * RFP_BENCHMARKS.floodCivilRateMyrPerMWac * 100) / 100;
+  const ownerDevCapEx = Math.round(subtotalEpc * RFP_BENCHMARKS.ownersCostRateOfEpc * 100) / 100;
 
-  // 5. Land Conversion Premium & Legal (NLC 1965 §124)
-  const landConversionCapEx = Math.round(exportCapacityMWa * 0.08 * 100) / 100;
-
-  // 6. External Civil, MSMA Drainage & Flood Mitigation CapEx
-  const floodCapEx = floodMitigationCostMyr > 0 ? Math.round(floodMitigationCostMyr * 100) / 100 : Math.round(exportCapacityMWa * 0.06 * 100) / 100;
-
-  // 7. Owner's Costs, Development, EIA & Power System Study
-  const ownerDevCapEx = Math.round(exportCapacityMWa * 0.12 * 100) / 100;
-
-  // 8. Contingency (4.0% of EPC & Civil)
-  const subtotalEpcCivil = pvCapEx + bessCapEx + gridCapEx + landCapEx + landConversionCapEx + floodCapEx + ownerDevCapEx;
+  const subtotalEpcCivil = subtotalEpc + landCapEx + landConversionCapEx + floodCapEx + ownerDevCapEx;
   const contingencyCapEx = Math.round(subtotalEpcCivil * 0.04 * 100) / 100;
-
-  // 9. Interest During Construction (IDC) (12 months @ 5.0% Islamic financing)
   const idcCapEx = Math.round((subtotalEpcCivil + contingencyCapEx) * 0.75 * 0.05 * 0.5 * 100) / 100;
-
-  // 10. Financing & Debt Arrangement Fees (0.8% of senior debt)
   const debtArrangementCapEx = Math.round((subtotalEpcCivil + contingencyCapEx + idcCapEx) * 0.75 * 0.008 * 100) / 100;
 
-  // TOTAL PROJECT CAPEX
   const totalCapExMyr = Math.round(
     (subtotalEpcCivil + contingencyCapEx + idcCapEx + debtArrangementCapEx) * 100
   ) / 100;
 
-  // Tender Guarantee Bid Bond (RM 0.50M for Package 3 LSS-Solar 10-30 MW)
-  const bidBondGuaranteeAmountMyr = 0.50;
+  const bidBondGuaranteeAmountMyr = RFP_PACKAGES.PACKAGE_3.bidBondMyr; // RM 0.35M
 
-  // Annual OpEx (Solar PV O&M + Insurance + Quit Rent + Admin)
-  const opExMyrPerYear = Math.round((capacityMWp * 0.045 + 0.35) * 100) / 100;
+  // OpEx for Package 3
+  const solarOpex = capacityMWp * RFP_BENCHMARKS.solarOpExRateMyrPerMWpYear;
+  const insuranceOpex = subtotalEpc * RFP_BENCHMARKS.insuranceRateOfEpc;
+  const quitRentOpex = acres * RFP_BENCHMARKS.quitRentRateMyrPerAcreYear;
+  const adminOpex = 0.20;
+  const bgCommissionOpex = bidBondGuaranteeAmountMyr * RFP_BENCHMARKS.bgCommissionRate;
 
-  // Indicative RFP Bid Price (RM / kWh) required for a 12.0% Equity IRR (Solar Only ~ RM 0.2380 / kWh)
-  const bidPriceMyrKwh = 0.2380;
-  const comparativePriceMyrKwh = Math.round((bidPriceMyrKwh * 0.97) * 10000) / 10000; // 3% merit discount
+  const opExMyrPerYear = Math.round((solarOpex + insuranceOpex + quitRentOpex + adminOpex + bgCommissionOpex) * 100) / 100;
 
-  const annualRevenueMyr = Math.round(((annualMWh * 1000 * bidPriceMyrKwh) / 1000000) * 100) / 100;
+  // Run Project Finance Engine (C-01, C-12)
+  const targetIRR = 0.125;
+  const pfResultInitial = calculateProjectFinance({
+    totalCapEx: totalCapExMyr,
+    annualOpExBase: opExMyrPerYear,
+    annualNetExportMWh: annualMWh,
+    tariff: 0.2380,
+    targetIRR,
+    wacc: 0.0575,
+  });
 
-  // LCOE calculation over 21-year PPA lifetime at 5.75% WACC
-  const discountRate = 0.0575;
-  const lifetimeYears = 21;
-  let pvCosts = totalCapExMyr;
-  let pvEnergy = 0;
+  const bidPriceMyrKwh = pfResultInitial.requiredTariff || 0.2380;
 
-  for (let yr = 1; yr <= lifetimeYears; yr++) {
-    const opexDiscounted = (opExMyrPerYear * Math.pow(1.025, yr - 1)) / Math.pow(1 + discountRate, yr);
-    const degradedMWh = annualMWh * Math.pow(1 - 0.0045, yr - 1);
-    const energyDiscounted = (degradedMWh * 1000) / Math.pow(1 + discountRate, yr);
+  const pfResult = calculateProjectFinance({
+    totalCapEx: totalCapExMyr,
+    annualOpExBase: opExMyrPerYear,
+    annualNetExportMWh: annualMWh,
+    tariff: bidPriceMyrKwh,
+    targetIRR,
+    wacc: 0.0575,
+  });
 
-    pvCosts += opexDiscounted;
-    pvEnergy += energyDiscounted;
-  }
-
-  const lcoeMyrKwh = Math.round((pvCosts * 1000000 / pvEnergy) * 10000) / 10000; // ~ RM 0.2050 / kWh
-  const approxIRR = 12.5;
+  const comparativePriceMyrKwh = Math.round((bidPriceMyrKwh * 0.97) * 10000) / 10000;
+  const annualRevenueMyr = Math.round(((annualMWh * 1000 * bidPriceMyrKwh) / 1e6) * 100) / 100;
 
   return {
     pvCapExMyr: pvCapEx,
@@ -444,9 +489,11 @@ export function calculatePackage3SolarFinancials(
     bidPriceMyrKwh,
     comparativePriceMyrKwh,
     annualRevenueMyr,
-    lcoeMyrKwh,
-    irrPercent: approxIRR,
-    paybackYears: 4.8,
+    lcoeMyrKwh: pfResult.lcoe,
+    irrPercent: pfResult.equityIRR ?? 12.5,
+    paybackYears: pfResult.paybackYears ?? 4.8,
+    minDSCR: pfResult.minDSCR,
+    avgDSCR: pfResult.avgDSCR,
     exportCapacityMWa,
     solarCapacityMWa,
     capacityMWp,
@@ -492,6 +539,8 @@ export function findNearestPMU(
 
 /**
  * Evaluates custom land plot for LSS6 solar suitability
+ * Addresses C-07: Terrain slope is null ('Unsurveyed') and not fabricated via trig formulas.
+ * Addresses C-03 & C-04: Accurate CF evaluation and floor capping.
  */
 export function analyzeCustomLandPlot(
   lat: number,
@@ -502,32 +551,45 @@ export function analyzeCustomLandPlot(
   const { nearest, distanceKm, secondNearest, secondDistanceKm } = findNearestPMU(lat, lng, allNodes);
   const cableRouteKm = estimateCableRouteKm(distanceKm);
   const suggestedVoltage: VoltageLevel = nearest.voltage;
+  const is33kV = suggestedVoltage === '33kV';
 
   const { ghiYear, ghiDay } = getEstimatedSolarGHI(lat, nearest.state);
   const { exportCapacityMWa, capacityMWp } = calculateSolarCapacityFromLand(areaAcres);
-  const { annualMWh } = calculateAnnualYieldMWh(capacityMWp, ghiYear, exportCapacityMWa);
-  const fin = suggestedVoltage === '33kV'
-    ? calculatePackage3SolarFinancials(exportCapacityMWa, cableRouteKm, suggestedVoltage, annualMWh)
-    : calculateFinancials(exportCapacityMWa, cableRouteKm, suggestedVoltage, annualMWh);
+  const { annualMWh, clearsCapacityFactorFloor } = calculateAnnualYieldMWh(
+    capacityMWp,
+    ghiYear,
+    exportCapacityMWa,
+    RFP_BENCHMARKS.bessRoundTripEfficiency,
+    RFP_BENCHMARKS.clippingLossRatio,
+    RFP_BENCHMARKS.auxiliaryLossRatio,
+    is33kV
+  );
 
-  // Terrain simulation based on lat/lng topography
-  const terrainSlope = Math.round((Math.abs(Math.sin(lat * 12 + lng * 8)) * 6.5 + 1.2) * 10) / 10;
-  const terrainCategory: 'Flat (<3°)' | 'Gentle Slope (3-8°)' | 'Hilly (8-15°)' | 'Steep (>15°)' = 
-    terrainSlope < 3 ? 'Flat (<3°)' : terrainSlope <= 8 ? 'Gentle Slope (3-8°)' : terrainSlope <= 15 ? 'Hilly (8-15°)' : 'Steep (>15°)';
+  const fin = is33kV
+    ? calculatePackage3SolarFinancials(exportCapacityMWa, cableRouteKm, suggestedVoltage, annualMWh, 0, 0, areaAcres)
+    : calculateFinancials(exportCapacityMWa, cableRouteKm, suggestedVoltage, annualMWh, 0, 0, areaAcres);
+
+  // C-07: Terrain slope is null (Unsurveyed) - no trigonometric simulation
+  const terrainSlope: number | null = null;
+  const terrainCategory: 'Unsurveyed' = 'Unsurveyed';
 
   // Feasibility Score formulation (0 - 100)
   // Distance score: 100 if <2km, minus 6 pts per km
   const distanceScore = Math.max(0, 100 - distanceKm * 6);
   // Solar score: 100 if >1800 ghi, 70 if 1600
   const solarScore = Math.min(100, Math.max(50, ((ghiYear - 1500) / 350) * 50 + 50));
-  // Terrain score: 100 if <3 deg, lower if >8
-  const terrainScore = terrainSlope < 3 ? 95 : terrainSlope < 8 ? 75 : 45;
   // Grid capacity match score
   const capacityMatchScore = nearest.capacityMW >= exportCapacityMWa ? 95 : 60;
 
-  const overallScore = Math.round(
-    distanceScore * 0.4 + solarScore * 0.25 + terrainScore * 0.2 + capacityMatchScore * 0.15
+  // Weightings redistributed cleanly without unverified terrain slope
+  let overallScore = Math.round(
+    distanceScore * 0.45 + solarScore * 0.35 + capacityMatchScore * 0.20
   );
+
+  // C-04: If Clause 11.1.1(b) Capacity Factor floor fails, cap overallScore at 40
+  if (!clearsCapacityFactorFloor) {
+    overallScore = Math.min(40, overallScore);
+  }
 
   return {
     customLat: lat,
