@@ -187,6 +187,8 @@ export const CustomLandCalculator: React.FC<CustomLandCalculatorProps> = ({
       isLargestContiguous: currentAcres >= 370,
       packageSuitability: pkgSuitability,
       overallScore: analysis.overallScore,
+      solarResource: analysis.solarResource,
+      yieldResult: analysis.yieldResult,
       notes: `User custom dropped pin located ${analysis.distanceToNearestPMUKm} km ${compassDir} of PMU ${analysis.nearestPMU.name}${is33kV ? ' (33kV Node - Package 3 Solar-Only)' : ''}.`,
     };
 

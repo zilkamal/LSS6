@@ -174,7 +174,10 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
     const activeZones = allJupemZones.filter((z) => selectedJupemCategories.includes(z.category));
     if (activeZones.length === 0) return;
 
-    const allCoords = activeZones.flatMap((z) => z.coords);
+    const allCoords = activeZones
+      .flatMap((z) => z.coords)
+      .filter((c) => Array.isArray(c) && c.length === 2 && typeof c[0] === 'number' && !isNaN(c[0]) && typeof c[1] === 'number' && !isNaN(c[1]));
+
     if (allCoords.length > 0) {
       const bounds = L.latLngBounds(allCoords);
       map.fitBounds(bounds, { padding: [40, 40] });
@@ -192,11 +195,20 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
     markersGroup.clearLayers();
     linesGroup.clearLayers();
 
+    // Helper to validate [lat, lng] tuple
+    const isValidLatLng = (lat?: number, lng?: number): lat is number =>
+      typeof lat === 'number' && !isNaN(lat) && typeof lng === 'number' && !isNaN(lng);
+
     // 0. Render JUPEM Land Classification Overlay if enabled
     if (showJupemOverlay) {
       const activeZones = allJupemZones.filter((z) => selectedJupemCategories.includes(z.category));
       activeZones.forEach((zone) => {
-        const polygon = L.polygon(zone.coords, {
+        const validCoords = (zone.coords || []).filter(
+          (c) => Array.isArray(c) && c.length === 2 && typeof c[0] === 'number' && !isNaN(c[0]) && typeof c[1] === 'number' && !isNaN(c[1])
+        );
+        if (validCoords.length < 3) return;
+
+        const polygon = L.polygon(validCoords, {
           color: zone.color,
           fillColor: zone.fillColor,
           fillOpacity: 0.35,
@@ -255,7 +267,12 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       ];
 
       exclusionZones.forEach((zone) => {
-        const polygon = L.polygon(zone.coords as [number, number][], {
+        const validCoords = (zone.coords || []).filter(
+          (c) => Array.isArray(c) && c.length === 2 && typeof c[0] === 'number' && !isNaN(c[0]) && typeof c[1] === 'number' && !isNaN(c[1])
+        );
+        if (validCoords.length < 3) return;
+
+        const polygon = L.polygon(validCoords as [number, number][], {
           color: '#dc2626',
           fillColor: '#ef4444',
           fillOpacity: 0.25,
@@ -275,7 +292,9 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       const colorScale = d3.scaleSequential(d3.interpolateYlOrRd).domain([0, 100]);
 
       nodes.forEach((node) => {
-        const landCosts = node.landParcels.map((l) => l.estimatedLandCostPerAcreMyr);
+        if (!isValidLatLng(node.lat, node.lng)) return;
+
+        const landCosts = (node.landParcels || []).map((l) => l.estimatedLandCostPerAcreMyr);
         const avgLandCost =
           landCosts.length > 0
             ? landCosts.reduce((a, b) => a + b, 0) / landCosts.length
@@ -315,7 +334,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
     }
 
     // 2. Render Search Radius Buffer Circles around selected PMU
-    if (selectedNode && showRadiusRings) {
+    if (selectedNode && showRadiusRings && isValidLatLng(selectedNode.lat, selectedNode.lng)) {
       const radiusColors: Record<number, string> = {
         5: '#10b981', // 5km - Optimal Proximity
         10: '#f59e0b', // 10km - Standard Interconnection
@@ -338,6 +357,8 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
     // 3. Render PMU Node Markers
     nodes.forEach((node) => {
+      if (!isValidLatLng(node.lat, node.lng)) return;
+
       const isSelected = selectedNode?.id === node.id;
       const is275kV = node.voltage === '275kV';
       const is33kV = node.voltage === '33kV';
@@ -422,7 +443,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
                 <div class="h-full ${barBgClass} rounded-full" style="width: ${utilPct}%"></div>
               </div>
             </div>
-            <div><strong>Developable Land:</strong> <span class="font-bold text-emerald-700">${node.landParcels.length} Sites Identified</span></div>
+            <div><strong>Developable Land:</strong> <span class="font-bold text-emerald-700">${(node.landParcels || []).length} Sites Identified</span></div>
             ${
               node.isPendingApplication
                 ? `<div class="text-amber-800 font-semibold text-[11px] bg-amber-50 p-1 rounded border border-amber-200">** Queue pending approval</div>`
@@ -459,32 +480,39 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
       // 4. Render nearby candidate land plot polygons & markers if this node is selected
       if (isSelected) {
-        node.landParcels.forEach((land) => {
+        (node.landParcels || []).forEach((land) => {
+          if (!isValidLatLng(land.lat, land.lng)) return;
+
           // Polygon Boundary Drawing
           if (land.gpsPolygon && land.gpsPolygon.length >= 3) {
-            const polyCoords = land.gpsPolygon.map((p) => [p.lat, p.lng] as [number, number]);
-            const strokeColor = land.overallScore >= 80 ? '#10b981' : land.overallScore >= 65 ? '#f59e0b' : '#ef4444';
+            const polyCoords = land.gpsPolygon
+              .filter((p) => isValidLatLng(p.lat, p.lng))
+              .map((p) => [p.lat, p.lng] as [number, number]);
 
-            const landPolygon = L.polygon(polyCoords, {
-              color: strokeColor,
-              fillColor: strokeColor,
-              fillOpacity: 0.35,
-              weight: 2,
-            });
+            if (polyCoords.length >= 3) {
+              const strokeColor = land.overallScore >= 80 ? '#10b981' : land.overallScore >= 65 ? '#f59e0b' : '#ef4444';
 
-            landPolygon.bindTooltip(
-              `<strong>${land.name}</strong><br/>${land.lotNumber} (${land.areaHectares} Ha / ${land.areaAcres} Acres)<br/>AI Score: ${land.overallScore}/100`,
-              {
-                permanent: false,
-                className: 'bg-slate-900 text-white text-xs font-sans p-1.5 rounded shadow-lg border border-slate-700',
-              }
-            );
+              const landPolygon = L.polygon(polyCoords, {
+                color: strokeColor,
+                fillColor: strokeColor,
+                fillOpacity: 0.35,
+                weight: 2,
+              });
 
-            landPolygon.on('click', () => {
-              onSelectLandParcel(land, node);
-            });
+              landPolygon.bindTooltip(
+                `<strong>${land.name}</strong><br/>${land.lotNumber} (${land.areaHectares} Ha / ${land.areaAcres} Acres)<br/>AI Score: ${land.overallScore}/100`,
+                {
+                  permanent: false,
+                  className: 'bg-slate-900 text-white text-xs font-sans p-1.5 rounded shadow-lg border border-slate-700',
+                }
+              );
 
-            linesGroup.addLayer(landPolygon);
+              landPolygon.on('click', () => {
+                onSelectLandParcel(land, node);
+              });
+
+              linesGroup.addLayer(landPolygon);
+            }
           }
 
           // Land Marker Icon
@@ -530,7 +558,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
                   ${land.isFastestToDevelop ? '<span class="bg-purple-100 text-purple-800 text-[10px] px-1.5 py-0.5 rounded font-bold">⚡ Fast Track</span>' : ''}
                   ${land.isLowestEnvRisk ? '<span class="bg-teal-100 text-teal-800 text-[10px] px-1.5 py-0.5 rounded font-bold">🌿 Clean Env</span>' : ''}
                 </div>
-                <div className="pt-2">
+                <div class="pt-2">
                   <button id="feasibility-btn-${land.id}" class="w-full bg-amber-500 text-slate-950 font-black py-1.5 px-2 rounded text-xs hover:bg-amber-400 shadow-xs cursor-pointer">
                     📋 Generate Detailed Feasibility Study
                   </button>
@@ -584,7 +612,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
     });
 
     // 4. Render Custom Dropped Pin if active
-    if (customPin) {
+    if (customPin && isValidLatLng(customPin.lat, customPin.lng)) {
       const customPinHtml = `
         <div class="w-7 h-7 rounded-full bg-rose-600 border-2 border-white shadow-xl flex items-center justify-center text-white text-xs font-bold animate-bounce">
           📍
@@ -600,10 +628,11 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       const pinMarker = L.marker([customPin.lat, customPin.lng], { icon: customIcon });
 
       // Find nearest PMU for custom pin
-      let nearestPMU = nodes[0];
-      let minDistance = calculateHaversineDistanceKm(customPin.lat, customPin.lng, nodes[0].lat, nodes[0].lng);
+      let nearestPMU: PMUNode | null = null;
+      let minDistance = Infinity;
 
       nodes.forEach((n) => {
+        if (!isValidLatLng(n.lat, n.lng)) return;
         const d = calculateHaversineDistanceKm(customPin.lat, customPin.lng, n.lat, n.lng);
         if (d < minDistance) {
           minDistance = d;
@@ -611,50 +640,51 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         }
       });
 
-      const cableRoute = estimateCableRouteKm(minDistance);
-
-      pinMarker.bindPopup(`
-        <div class="p-2 min-w-[220px]">
-          <div class="font-bold text-xs text-rose-700 mb-1">📍 Custom Candidate Land Site</div>
-          <div class="text-xs space-y-1 text-slate-800">
-            <div><strong>GPS:</strong> ${customPin.lat.toFixed(4)}, ${customPin.lng.toFixed(4)}</div>
-            <div><strong>Land Area:</strong> ${customPin.areaAcres} Acres</div>
-            <div class="bg-amber-100 p-1.5 rounded border border-amber-300 font-bold text-slate-900 mt-1">
-              Nearest Node: PMU ${nearestPMU.name} (${nearestPMU.voltage})<br/>
-              <span class="text-amber-700">Distance: ${minDistance} km</span>
+      if (nearestPMU) {
+        const activeNearestPMU: PMUNode = nearestPMU;
+        pinMarker.bindPopup(`
+          <div class="p-2 min-w-[220px]">
+            <div class="font-bold text-xs text-rose-700 mb-1">📍 Custom Candidate Land Site</div>
+            <div class="text-xs space-y-1 text-slate-800">
+              <div><strong>GPS:</strong> ${customPin.lat.toFixed(4)}, ${customPin.lng.toFixed(4)}</div>
+              <div><strong>Land Area:</strong> ${customPin.areaAcres} Acres</div>
+              <div class="bg-amber-100 p-1.5 rounded border border-amber-300 font-bold text-slate-900 mt-1">
+                Nearest Node: PMU ${activeNearestPMU.name} (${activeNearestPMU.voltage})<br/>
+                <span class="text-amber-700">Distance: ${minDistance} km</span>
+              </div>
             </div>
           </div>
-        </div>
-      `);
+        `);
 
-      markersGroup.addLayer(pinMarker);
+        markersGroup.addLayer(pinMarker);
 
-      // Line from custom pin to nearest PMU
-      const customLine = L.polyline(
-        [
-          [customPin.lat, customPin.lng],
-          [nearestPMU.lat, nearestPMU.lng],
-        ],
-        {
-          color: '#e11d48',
-          weight: 3,
-          dashArray: '4, 4',
-        }
-      );
+        // Line from custom pin to nearest PMU
+        const customLine = L.polyline(
+          [
+            [customPin.lat, customPin.lng],
+            [activeNearestPMU.lat, activeNearestPMU.lng],
+          ],
+          {
+            color: '#e11d48',
+            weight: 3,
+            dashArray: '4, 4',
+          }
+        );
 
-      customLine.bindTooltip(`Nearest PMU ${nearestPMU.name}: ${minDistance} km`, {
-        permanent: true,
-        direction: 'center',
-        className: 'custom-pin-tooltip bg-rose-950 text-rose-200 text-[11px] font-bold px-2 py-0.5 rounded border border-rose-500',
-      });
+        customLine.bindTooltip(`Nearest PMU ${activeNearestPMU.name}: ${minDistance} km`, {
+          permanent: true,
+          direction: 'center',
+          className: 'custom-pin-tooltip bg-rose-950 text-rose-200 text-[11px] font-bold px-2 py-0.5 rounded border border-rose-500',
+        });
 
-      linesGroup.addLayer(customLine);
+        linesGroup.addLayer(customLine);
+      }
     }
   }, [nodes, selectedNode, customPin, showRadiusRings, showEnvironmentalOverlay, showJupemOverlay, selectedJupemCategories, allJupemZones, selectedRadiusKm, onSelectNode, onSelectLandParcel, onAnalyzeFeasibility]);
 
   // Center Map on Selected Node
   useEffect(() => {
-    if (selectedNode && mapInstanceRef.current) {
+    if (selectedNode && mapInstanceRef.current && typeof selectedNode.lat === 'number' && !isNaN(selectedNode.lat) && typeof selectedNode.lng === 'number' && !isNaN(selectedNode.lng)) {
       mapInstanceRef.current.flyTo([selectedNode.lat, selectedNode.lng], 11, { duration: 1.2 });
     }
   }, [selectedNode]);

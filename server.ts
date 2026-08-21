@@ -79,16 +79,203 @@ app.get('/api/pmu-nodes/:id', (req, res) => {
   res.json(node);
 });
 
+// Cache for NASA POWER solar resource responses (30-day TTL)
+interface CachedSolarData {
+  data: any;
+  timestamp: number;
+}
+const solarResourceCache = new Map<string, CachedSolarData>();
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+const ACTUAL_MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const NASA_BIAS_WARNING =
+  'NASA POWER reanalysis at ~55 km resolution. Over Malaysian coastal and monsoon-affected sites this product typically over-reads GHI by 3-8% against ground measurement. Screening use only. Not bankable.';
+
+// 2b. Solar Resource Provider API (NASA POWER Climatology Proxy with 30-Day Caching)
+app.get('/api/solar-resource', async (req, res) => {
+  const latStr = req.query.lat as string;
+  const lonStr = (req.query.lon || req.query.lng) as string;
+
+  const lat = parseFloat(latStr);
+  const lon = parseFloat(lonStr);
+
+  if (isNaN(lat) || isNaN(lon)) {
+    return res.status(400).json({
+      grade: 'UNAVAILABLE',
+      annualGHI_kwh_m2: null,
+      monthly: [],
+      error: 'Valid lat and lon query parameters required',
+      warnings: ['Invalid GPS coordinates provided for solar resource lookup.'],
+    });
+  }
+
+  // Round coordinates to 2 decimal places (~1.1 km) for caching
+  const cacheKey = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  const cached = solarResourceCache.get(cacheKey);
+  const now = Date.now();
+
+  if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+    return res.json(cached.data);
+  }
+
+  try {
+    const nasaUrl = `https://power.larc.nasa.gov/api/temporal/climatology/point?parameters=ALLSKY_SFC_SW_DWN&community=RE&latitude=${lat}&longitude=${lon}&format=JSON`;
+    
+    // Add timeout to fetch
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(nasaUrl, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'LSS6-Feasibility-Platform/2.0' },
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`NASA POWER API HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const json: any = await response.json();
+    const swParams = json?.properties?.parameter?.ALLSKY_SFC_SW_DWN;
+
+    if (!swParams || typeof swParams !== 'object') {
+      throw new Error('Malformed NASA POWER payload: missing ALLSKY_SFC_SW_DWN');
+    }
+
+    const monthKeys = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const monthly: Array<{ month: number; ghi_kwh_m2: number; days: number; dailyAvg_kwh_m2: number }> = [];
+    let annualSum = 0;
+
+    for (let i = 0; i < 12; i++) {
+      const key = monthKeys[i];
+      const dailyKwh = Number(swParams[key]);
+      if (isNaN(dailyKwh) || dailyKwh <= 0) {
+        throw new Error(`Invalid daily average for month ${key}: ${dailyKwh}`);
+      }
+
+      const days = ACTUAL_MONTH_DAYS[i];
+      const monthlyTotal = Math.round(dailyKwh * days * 10) / 10;
+      annualSum += monthlyTotal;
+
+      monthly.push({
+        month: i + 1,
+        ghi_kwh_m2: monthlyTotal,
+        days,
+        dailyAvg_kwh_m2: Math.round((monthlyTotal / days) * 100) / 100, // February divides by 28 (Task 2)
+      });
+    }
+
+    const annualGHI_kwh_m2 = Math.round(annualSum * 10) / 10;
+
+    const solarResource = {
+      latitude: lat,
+      longitude: lon,
+      annualGHI_kwh_m2,
+      monthly,
+      grade: 'SCREENING',
+      provenance: {
+        dataset: 'NASA POWER v9.0 Climatology (SSE-RE)',
+        resolution: '0.5° x 0.625° (~55 km)',
+        periodOfRecord: '1984-2023 (40-Year Climatology)',
+        datasetUncertainty_pct: 8.0,
+        retrievedAt: new Date().toISOString(),
+        biasCorrection: 'None applied',
+      },
+      warnings: [NASA_BIAS_WARNING],
+    };
+
+    solarResourceCache.set(cacheKey, { data: solarResource, timestamp: now });
+    res.json(solarResource);
+  } catch (err: any) {
+    console.error(`[SolarResource] Error fetching NASA POWER for (${lat}, ${lon}):`, err.message);
+    const unavailableResponse = {
+      latitude: lat,
+      longitude: lon,
+      annualGHI_kwh_m2: null,
+      monthly: [],
+      grade: 'UNAVAILABLE',
+      provenance: {
+        dataset: 'NASA POWER Climatology (Failed)',
+        resolution: 'N/A',
+        periodOfRecord: 'N/A',
+        datasetUncertainty_pct: 0,
+        retrievedAt: new Date().toISOString(),
+        biasCorrection: null,
+      },
+      warnings: [`Solar resource retrieval failed: ${err.message}. Downstream yield calculation disabled.`],
+    };
+    res.status(200).json(unavailableResponse);
+  }
+});
+
 // 3. Find nearest PMU & compute feasibility for custom GPS coordinates
-app.post('/api/nearest-pmu', (req, res) => {
+app.post('/api/nearest-pmu', async (req, res) => {
   const { lat, lng, areaAcres } = req.body;
   if (typeof lat !== 'number' || typeof lng !== 'number') {
     return res.status(400).json({ error: 'Valid lat and lng required' });
   }
 
   const acres = typeof areaAcres === 'number' && areaAcres > 0 ? areaAcres : 250;
-  const analysis = analyzeCustomLandPlot(lat, lng, acres, PMU_NODES);
 
+  // Retrieve solar resource from cache or NASA POWER
+  const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  let resource = solarResourceCache.get(cacheKey)?.data;
+
+  if (!resource) {
+    try {
+      const nasaUrl = `https://power.larc.nasa.gov/api/temporal/climatology/point?parameters=ALLSKY_SFC_SW_DWN&community=RE&latitude=${lat}&longitude=${lng}&format=JSON`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const response = await fetch(nasaUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const json: any = await response.json();
+        const swParams = json?.properties?.parameter?.ALLSKY_SFC_SW_DWN;
+        if (swParams) {
+          const monthKeys = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+          const monthly: Array<{ month: number; ghi_kwh_m2: number; days: number; dailyAvg_kwh_m2: number }> = [];
+          let annualSum = 0;
+
+          for (let i = 0; i < 12; i++) {
+            const key = monthKeys[i];
+            const dailyKwh = Number(swParams[key]);
+            const days = ACTUAL_MONTH_DAYS[i];
+            const monthlyTotal = Math.round(dailyKwh * days * 10) / 10;
+            annualSum += monthlyTotal;
+            monthly.push({
+              month: i + 1,
+              ghi_kwh_m2: monthlyTotal,
+              days,
+              dailyAvg_kwh_m2: Math.round((monthlyTotal / days) * 100) / 100,
+            });
+          }
+
+          resource = {
+            latitude: lat,
+            longitude: lng,
+            annualGHI_kwh_m2: Math.round(annualSum * 10) / 10,
+            monthly,
+            grade: 'SCREENING',
+            provenance: {
+              dataset: 'NASA POWER v9.0 Climatology (SSE-RE)',
+              resolution: '0.5° x 0.625° (~55 km)',
+              periodOfRecord: '1984-2023 (40-Year Climatology)',
+              datasetUncertainty_pct: 8.0,
+              retrievedAt: new Date().toISOString(),
+              biasCorrection: 'None applied',
+            },
+            warnings: [NASA_BIAS_WARNING],
+          };
+          solarResourceCache.set(cacheKey, { data: resource, timestamp: Date.now() });
+        }
+      }
+    } catch (err: any) {
+      console.warn('[NearestPMU] Solar resource lookup skipped:', err.message);
+    }
+  }
+
+  const analysis = analyzeCustomLandPlot(lat, lng, acres, PMU_NODES, resource);
   res.json(analysis);
 });
 

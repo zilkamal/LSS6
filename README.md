@@ -1,12 +1,16 @@
 # Malaysia LSS6 Solar & Hybrid Site Intelligence Platform
 
-An enterprise-grade GIS intelligence and site suitability platform designed for Malaysia's Large Scale Solar 6 (LSS6) and LSS-Hybrid renewable energy tenders launched by the Ministry of Energy Transition and Water Transformation (PETRA) and Suruhanjaya Tenaga (ST). The platform automates site screening, cadastral title lookup, JUPEM land use overlays, JPS DID flood risk modeling, solar irradiance (GHI) analysis, grid evacuation routing to TNB PMU substations, financial & sensitivity modeling, and comprehensive multi-page feasibility study generation.
+An enterprise-grade GIS intelligence and site suitability platform designed for Malaysia's Large Scale Solar 6 (LSS6) and LSS-Hybrid renewable energy tenders launched by the Ministry of Energy Transition and Water Transformation (PETRA) and Suruhanjaya Tenaga (ST). 
+
+The platform automates site screening, cadastral title lookup (JUPEM 2026), JPS DID flood inundation & hydrology modeling, Digital Elevation Model (DEM) slope analysis, Global Solar Atlas (GHI) irradiance curves, grid evacuation routing to 48 TNB transmission PMUs & 60 designated 33kV distribution nodes, financial & sensitivity modeling, and multi-page engineering feasibility PDF study generation.
+
+Official Reference: **ST(IP/EMP/SSCP) 12/1/12 (6)** | Program Investment Pool: **RM 13 – 15 Billion**
 
 ---
 
 ## ⚡ PETRA LSS6 Official Program Parameters & 3 Tender Packages
 
-The Ministry of Energy Transition and Water Transformation (PETRA) and Suruhanjaya Tenaga (ST) have structured the LSS6 bidding exercise with an expected private investment of **RM 13 Billion to RM 15 Billion**. The platform supports dedicated workflows and datasets for all 3 tender packages:
+The platform supports dedicated workflows and datasets for all 3 official tender packages:
 
 ```
 +---------------------------------------------------------------------------------------------------------+
@@ -19,9 +23,10 @@ The Ministry of Energy Transition and Water Transformation (PETRA) and Suruhanja
 | Total Program Quota   | 1,250 MWa.c. (2,500 MW Solar + BESS)  | 150 MWa.c. (Solar Only)                 |
 | Bidding Scale         | 60 MWa.c. to 500 MWa.c.               | 10 MWa.c. to 30 MWa.c.                  |
 | Interconnection Level | 132 kV or 275 kV Transmission Grid    | 33 kV and below (Distribution Network)  |
-| Official PMU Nodes    | 48 Transmission Substations           | 60 Designated Distribution PMU Points   |
-| EPC Benchmark Cost    | RM 2.65M / MWp + BESS (RM 1.2M/MWh)   | RM 2.45M / MWp (Solar EPC Only)         |
-| Target COD Deadline   | 31 December 2029                      | 31 December 2029                        |
+| Official Grid Nodes   | 48 Transmission PMUs (132kV/275kV)    | 60 Designated 33kV Distribution Points  |
+| EPC Benchmark Cost    | RM 2.65M / MWp + BESS (RM 0.82M/MWh)  | RM 2.45M / MWp (Solar EPC Only)         |
+| Operating Ratio       | Mandatory 2:1:4 (Solar:BESS MW:MWh)   | 100% Direct Solar PV Grid Injection     |
+| Target COD Deadline   | 1 March 2029 (IBSS) / 1 Dec 2029      | 31 December 2029                        |
 +-----------------------+---------------------------------------+-----------------------------------------+
 ```
 
@@ -30,55 +35,59 @@ The Ministry of Energy Transition and Water Transformation (PETRA) and Suruhanja
 ## 🏛️ System Architecture
 
 ```
-+-----------------------------------------------------------------------------------------------------------+
-|                                  MALAYSIA LSS6 SITE INTELLIGENCE SYSTEM ARCHITECTURE                      |
-+-----------------------------------------------------------------------------------------------------------+
-|                                                                                                           |
-|   +----------------------------------+          +-----------------------------------------------------+   |
-|   |         USER INTERFACE           |          |               GIS & DATA ENGINE                     |   |
-|   |  - Program Switcher (Hybrid/Pkg3)| <------> |  - 48 Hybrid PMUs (132kV / 275kV)                   |   |
-|   |  - Fullscreen GIS Map + HUD      |          |  - 60 Package 3 PMUs (33kV Distribution)            |   |
-|   |  - Sensitivity & Financial Matrix|          |  - JUPEM 2026 Land Cadastral Zones (5 Classes)      |   |
-|   |  - PMU Headroom Capacity Table   |          |  - JPS DID Flood Inundation & Hydrology Modeling    |   |
-|   |  - Land Parcel Candidate Drawers |          |  - Global Solar Atlas GHI Irradiance Engine         |   |
-|   +----------------------------------+          +-----------------------------------------------------+   |
-|                     |                                                      |                              |
-|                     v                                                      v                              |
-|   +----------------------------------+          +-----------------------------------------------------+   |
-|   |    FINANCIAL & LCOE CALCULATOR   |          |           PDF REPORT & EXPORT GENERATOR             |   |
-|   |  - Solar-Only vs Hybrid Capex    |          |  - jsPDF Multi-Page Feasibility Report (7 Pages)    |   |
-|   |  - 33kV / 132kV / 275kV Wayleave |          |  - OpenStreetMap Vector Canvas Map Render           |   |
-|   |  - DSCR, Equity IRR, NPV, Payback|          |  - Full Financial Statement & Cashflow Matrix       |   |
-|   +----------------------------------+          +-----------------------------------------------------+   |
-|                     |                                                      |                              |
-|                     +--------------------------+---------------------------+                              |
-|                                                |                                                          |
-|                                                v                                                          |
-|                        +-----------------------------------------------+                                  |
-|                        |          EXPRESS BACKEND PROXY SERVER         |                                  |
-|                        |       - API Endpoint: /api/generate-feasibility|                                 |
-|                        |       - Secure Environment Key Management     |                                  |
-|                        +-----------------------------------------------+                                  |
-|                                                |                                                          |
-|                                                v                                                          |
-|                        +-----------------------------------------------+                                  |
-|                        |       GOOGLE GEMINI AI SYNTHESIS ENGINE       |                                  |
-|                        |         - @google/genai (Gemini 2.5)          |                                  |
-|                        |         - Automated Technical Executive Brief |                                  |
-|                        |         - Regulatory Compliance Matrix        |                                  |
-|                        +-----------------------------------------------+                                  |
-+-----------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------+
+|                                  MALAYSIA LSS6 SITE INTELLIGENCE SYSTEM ARCHITECTURE                          |
++---------------------------------------------------------------------------------------------------------------+
+|                                                                                                               |
+|   +---------------------------------------+            +--------------------------------------------------+   |
+|   |         USER INTERFACE LAYER          |            |              GIS & DATA LAYER                    |   |
+|   |  - Program Switcher (Hybrid / Pkg 3)  | <--------> |  - 48 Hybrid PMUs (132kV / 275kV Transmission)   |   |
+|   |  - Fullscreen GIS Map + HUD Controls  |            |  - 60 Package 3 PMU Nodes (33kV Distribution)    |   |
+|   |  - Dual-Variable Sensitivity Matrix   |            |  - JUPEM 2026 Land Cadastral Zones (5 Classes)   |   |
+|   |  - Custom Land & Pinpoint Analyzer    |            |  - JPS DID Flood Inundation & Hydrology Engine   |   |
+|   |  - PMU Headroom Capacity Table        |            |  - Global Solar Atlas GHI Irradiance Engine      |   |
+|   |  - LSS6 Bidding Wizard & RFP Tracker  |            |  - DEM Altitude & Topographic Slope Model        |   |
+|   +---------------------------------------+            +--------------------------------------------------+   |
+|                      |                                                          |                             |
+|                      v                                                          v                             |
+|   +---------------------------------------+            +--------------------------------------------------+   |
+|   |      FINANCIAL & LCOE ENGINE          |            |          PDF REPORT & EXPORT GENERATOR           |   |
+|   |  - Package 1/2 vs Package 3 Modeling  |            |  - jsPDF Multi-Page Feasibility Report (7 Pages) |   |
+|   |  - 33kV / 132kV / 275kV Wayleave Math |            |  - ST RFP TOR Formatted PDF & Readme Exporter    |   |
+|   |  - DSCR, Equity IRR, NPV, Payback     |            |  - OpenStreetMap Vector Canvas Map Render        |   |
+|   |  - Real-time CapEx Adjustments        |            |  - Full Financial Statement & Cashflow Matrix    |   |
+|   +---------------------------------------+            +--------------------------------------------------+   |
+|                      |                                                          |                             |
+|                      +----------------------------+-----------------------------+                             |
+|                                                   |                                                           |
+|                                                   v                                                           |
+|                         +---------------------------------------------------+                                 |
+|                         |            EXPRESS BACKEND PROXY SERVER           |                                 |
+|                         |       - API Endpoint: /api/generate-feasibility   |                                 |
+|                         |       - Endpoint: /api/generate-feasibility-report|                                 |
+|                         |       - Secure Environment Key Management (Node)  |                                 |
+|                         +---------------------------------------------------+                                 |
+|                                                   |                                                           |
+|                                                   v                                                           |
+|                         +---------------------------------------------------+                                 |
+|                         |         GOOGLE GEMINI AI SYNTHESIS ENGINE         |                                 |
+|                         |           - @google/genai TypeScript SDK          |                                 |
+|                         |           - JSON Schema Strict Parsing Output     |                                 |
+|                         |           - Engineering Risk & Mitigation Matrix  |                                 |
+|                         |           - ST/TNB Regulatory Permitting Review   |                                 |
+|                         +---------------------------------------------------+                                 |
++---------------------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
 ## 🌟 Key Platform Capabilities
 
-### 🗺️ Full-Screen GIS & OpenStreetMap Exploration
+### 🗺️ Full-Screen GIS & Leaflet Exploration
 - **Full Screen Toggle**: Instant one-click fullscreen expansion (`Maximize2` / `Minimize2` or `Esc`) allowing deep spatial inspection across Peninsular Malaysia.
 - **HUD & Legend Control**: Toggle the LSS6 Legend, JUPEM Land Layers, D3 Heatmap, and Floating HUD Panels with a single click to maximize visible map real estate.
 - **Dynamic 3-Tier Voltage Coloring**:
-  - 🔵 **33 kV PMU Points**: Cyan/Blue markers with 33kV distribution badges (Package 3).
+  - 🔵 **33 kV Distribution Nodes**: Cyan/Blue markers with 33kV distribution badges (Package 3).
   - 🟢 **132 kV Substations**: Emerald markers for standard transmission injection (Hybrid).
   - 🟣 **275 kV Extra-High Voltage**: Purple markers for large-scale transmission injection (Hybrid).
 - **Proximity Buffer Circles**: Interactive 5 km, 10 km, 20 km, and 30 km radius rings centered on PMU substations to calculate transmission losses and cable wayleave costs.
@@ -105,12 +114,33 @@ The Ministry of Energy Transition and Water Transformation (PETRA) and Suruhanja
 
 ---
 
-## 🚀 Tech Stack
+## 🛑 Cadastral Land & PLANMalaysia Zoning Compliance Policy
+
+1. **Strict Urban Residential Exclusion**: All proposed candidate plots maintain a verified **>3.0 km buffer** (minimum 500m mandatory) from any residential settlement to eliminate glint, glare, and acoustic impacts.
+2. **Permanent Reserved Forest Prohibition (ST Clause 6.1)**: Sites inside Permanent Reserved Forests (*Hutan Simpan Kekal*) are strictly rejected unless accompanied by explicit written state authority de-gazettement.
+3. **Permitted Agriculture Title Conversion (NLC Sec 124)**: Agricultural land (*Tanaman Pertanian*) is converted to utility use (*Syarat Khas Stesen Janakuasa Solar*).
+4. **Brownfield & Mining Reclamation**: Former tin mining land (*Bekas Perlombongan*) and unutilized scrubland (*Semak Samun*) receive top priority for rapid PTG development order approval.
+
+---
+
+## ⚡ Grid Interconnection Technical Benchmarks
+
+| Parameter | 33 kV Distribution Grid (Pkg 3) | 132 kV Transmission Grid | 275 kV Transmission Grid |
+| :--- | :--- | :--- | :--- |
+| **Export Capacity Target** | 10 MW – 30 MW | 50 MW – 100 MW | 100 MW – 250 MW |
+| **Transmission Line Cost** | RM 0.55 Million / km | RM 1.20 Million / km | RM 2.40 Million / km |
+| **Substation Bay Extension** | RM 3.50 Million | RM 8.50 Million | RM 14.50 Million |
+| **Conductive Line Loss** | ~ 0.45% / km | ~ 0.28% / km | ~ 0.14% / km |
+| **BESS Storage Spec (4-Hr)** | Not Required (0 MWh) | 30 MW / 120 MWh BESS | 100 MW / 400 MWh BESS |
+
+---
+
+## 🛠️ Tech Stack
 
 - **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, Lucide React Icons
-- **Mapping & GIS**: Leaflet, OpenStreetMap Tile Engine, HTML5 Canvas Rasterizer, D3.js (Geospatial Risk Heatmap)
+- **GIS Mapping**: Leaflet, OpenStreetMap Tile Engine, HTML5 Canvas Rasterizer, D3.js (Geospatial Risk Heatmap)
 - **Document Generation**: jsPDF (Sequential multi-page PDF rendering)
-- **AI Integration**: Express + Vite full-stack server proxy for Gemini 2.5 API (`/api/generate-feasibility-report`)
+- **AI Integration**: Express + Vite full-stack server proxy for Gemini API (`/api/generate-feasibility-report`)
 
 ---
 

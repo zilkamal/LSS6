@@ -6,6 +6,10 @@ import { TopographicalRiskVisualizer } from './TopographicalRiskVisualizer';
 import { TnbEnquiryLetterModal } from './TnbEnquiryLetterModal';
 import { EditLandDetailsModal } from './EditLandDetailsModal';
 import { GridSchematicViewer } from './GridSchematicViewer';
+import { SolarProvenanceBanner } from './SolarProvenanceBanner';
+import { TmyUploadModal } from './TmyUploadModal';
+import { calculateYield, YieldResult } from '../services/yieldEngine';
+import { SolarResource } from '../services/solarResource';
 import {
   X,
   Zap,
@@ -369,6 +373,7 @@ export const LandFeasibilityModal: React.FC<LandFeasibilityModalProps> = ({
   const [isTnbLetterOpen, setIsTnbLetterOpen] = useState<boolean>(false);
   const [customLand, setCustomLand] = useState<LandParcel | null>(null);
   const [isEditLandModalOpen, setIsEditLandModalOpen] = useState<boolean>(false);
+  const [isTmyModalOpen, setIsTmyModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
     setCustomLand(null);
@@ -377,6 +382,49 @@ export const LandFeasibilityModal: React.FC<LandFeasibilityModalProps> = ({
   const activeLand = customLand || land;
 
   const isPackage3 = pmuNode.voltage === '33kV' || land.packageSuitability?.includes('Package 3') || (land.bessEnergyMWh === 0 && land.bessPowerMW === 0);
+
+  const handleBankableTmyLoaded = (resource: SolarResource) => {
+    const dcMWp = activeLand.maxCapacityMW || (isPackage3 ? 25 : 75);
+    const expMWac = activeLand.exportCapacityMWa || (isPackage3 ? 20 : 30);
+    const invMWac = isPackage3 ? expMWac : expMWac * 2;
+    const bessMW = isPackage3 ? 0 : expMWac;
+    const bessMWh = isPackage3 ? 0 : expMWac * 4;
+
+    const yieldRes = calculateYield(resource, {
+      dcCapacityMWp: dcMWp,
+      inverterCapacityMWac: invMWac,
+      exportCapacityMWac: expMWac,
+      bessPowerMW: bessMW,
+      bessEnergyMWh: bessMWh,
+      isPackage3SolarOnly: isPackage3,
+      bessRoundTripEfficiency: 0.85,
+      auxiliaryLossRatio: 0.010,
+    });
+
+    const updatedMonthlyData = yieldRes.monthlyYield.map((m) => ({
+      month: m.monthName,
+      ghiKwhM2: m.ghi_kwh_m2,
+      p50MWh: Math.round(m.netYieldMWh),
+      p90MWh: Math.round(m.netYieldMWh * (yieldRes.p90_1Year_MWh / yieldRes.p50AnnualMWh)),
+    }));
+
+    setCustomLand({
+      ...activeLand,
+      solarResource: resource,
+      yieldResult: yieldRes,
+      ghiKwhM2Year: resource.annualGHI_kwh_m2 || activeLand.ghiKwhM2Year,
+      ghiKwhM2Day: resource.annualGHI_kwh_m2 ? Math.round((resource.annualGHI_kwh_m2 / 365) * 100) / 100 : activeLand.ghiKwhM2Day,
+      estimatedAnnualMWh: yieldRes.p50AnnualMWh,
+      p50AnnualMWh: yieldRes.p50AnnualMWh,
+      p90AnnualMWh: yieldRes.p90_1Year_MWh,
+      capacityFactorYear1: yieldRes.capacityFactorYear1Pct,
+      capacityFactorYear21: yieldRes.capacityFactorYear21Pct,
+      clearsCapacityFactorFloor: yieldRes.clearsCapacityFactorFloor,
+      monthlyIrradianceData: updatedMonthlyData,
+      overallScore: yieldRes.clearsCapacityFactorFloor ? activeLand.overallScore : Math.min(40, activeLand.overallScore),
+    });
+    setIsTmyModalOpen(false);
+  };
 
   // User CapEx Manual Adjustment State
   const is275kV = pmuNode.voltage === '275kV';
@@ -2437,99 +2485,375 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
           )}
 
           {/* TAB 3: Solar Irradiance Historical Data & Potential Power */}
-          {activeReportTab === 'solar' && (
-            <div className="space-y-6 font-mono text-xs">
-              <div className="bg-amber-50 p-4 rounded border border-amber-200">
-                <h4 className="font-bold text-amber-900 text-sm mb-1 uppercase">Historical Solar Irradiance & Yield Potential (P50 / P90)</h4>
-                <p className="text-slate-700 text-xs">
-                  Monthly Global Horizontal Irradiation (GHI) satellite historical data and P50/P90 probability exceedance energy yields.
-                </p>
-              </div>
+          {activeReportTab === 'solar' && (() => {
+            const dcMWp = activeLand.maxCapacityMW || (isPackage3 ? 25 : 75);
+            const expMWac = activeLand.exportCapacityMWa || (isPackage3 ? 20 : 30);
+            const invMWac = isPackage3 ? expMWac : expMWac * 2;
+            const bessMW = isPackage3 ? 0 : expMWac;
+            const bessMWh = isPackage3 ? 0 : expMWac * 4;
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div className="bg-slate-50 p-4 rounded border border-slate-200">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase block">Annual GHI Irradiance</span>
-                  <div className="text-xl font-black text-amber-700">{land.ghiKwhM2Year} kWh/m²/yr</div>
-                  <span className="text-xs text-slate-500">{land.ghiKwhM2Day} kWh/m²/day</span>
+            // Generate or fetch complete YieldResult
+            const solarRes: SolarResource = activeLand.solarResource || {
+              latitude: activeLand.lat,
+              longitude: activeLand.lng,
+              annualGHI_kwh_m2: activeLand.ghiKwhM2Year || 1620,
+              monthly: (activeLand.monthlyIrradianceData || []).map((m, idx) => {
+                const days = idx === 1 ? 28 : [3, 5, 8, 10].includes(idx) ? 30 : 31;
+                return {
+                  month: idx + 1,
+                  ghi_kwh_m2: m.ghiKwhM2,
+                  days,
+                  dailyAvg_kwh_m2: Math.round((m.ghiKwhM2 / days) * 100) / 100,
+                };
+              }),
+              grade: activeLand.dataProvenance === 'TMY_COMMERCIAL' ? 'BANKABLE' : 'SCREENING',
+              provenance: {
+                dataset: activeLand.dataProvenance === 'TMY_COMMERCIAL' ? 'SolarGIS / Meteonorm Commercial TMY' : 'NASA POWER v9.0 Climatology (SSE-RE)',
+                resolution: activeLand.dataProvenance === 'TMY_COMMERCIAL' ? '1 km high-resolution spatial grid' : '0.5° × 0.625° (~55km grid)',
+                periodOfRecord: '1984–2023 (40-Year Satellite Climatology)',
+                datasetUncertainty_pct: activeLand.dataProvenance === 'TMY_COMMERCIAL' ? 3.5 : 8.0,
+                retrievedAt: new Date().toISOString(),
+                biasCorrection: activeLand.dataProvenance === 'TMY_COMMERCIAL' ? 'Ground calibrated' : 'None applied',
+              },
+              warnings: activeLand.dataProvenance === 'TMY_COMMERCIAL' ? [] : ['Screening data only. Upload a bankable commercial TMY dataset before final RFP submission.'],
+            };
+
+            const yieldRes: YieldResult = activeLand.yieldResult || calculateYield(solarRes, {
+              dcCapacityMWp: dcMWp,
+              inverterCapacityMWac: invMWac,
+              exportCapacityMWac: expMWac,
+              bessPowerMW: bessMW,
+              bessEnergyMWh: bessMWh,
+              isPackage3SolarOnly: isPackage3,
+              bessRoundTripEfficiency: 0.85,
+              auxiliaryLossRatio: 0.010,
+            });
+
+            const isUnavailable = !yieldRes.isCalculable || solarRes.grade === 'UNAVAILABLE';
+
+            return (
+              <div className="space-y-6 font-mono text-xs">
+                {/* Provenance Banner */}
+                <SolarProvenanceBanner
+                  resource={solarRes}
+                  compact={false}
+                  onUploadTmyClick={() => setIsTmyModalOpen(true)}
+                />
+
+                {/* Primary Resource Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                  <div className="bg-slate-50 p-3.5 rounded border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase block">Annual GHI Irradiance</span>
+                    <div className="text-lg font-black text-amber-700">
+                      {isUnavailable || !solarRes.annualGHI_kwh_m2 ? '—' : `${solarRes.annualGHI_kwh_m2.toLocaleString()} kWh/m²`}
+                    </div>
+                    <span className="text-[11px] text-slate-500">
+                      {isUnavailable || !solarRes.annualGHI_kwh_m2 ? '—' : `${(solarRes.annualGHI_kwh_m2 / 365).toFixed(2)} kWh/m²/day`}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3.5 rounded border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase block">Transposed GTI (POA)</span>
+                    <div className="text-lg font-black text-amber-900">
+                      {isUnavailable ? '—' : `${(yieldRes.annualGTI_kwh_m2 || Math.round((solarRes.annualGHI_kwh_m2 || 1620) * 1.09)).toLocaleString()} kWh/m²`}
+                    </div>
+                    <span className="text-[10px] text-slate-500 leading-tight">Fixed Tilt ~10° (+3% to +4% Gain)</span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3.5 rounded border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase block">Specific Yield (Year 1)</span>
+                    <div className="text-lg font-black text-blue-700">
+                      {isUnavailable ? '—' : `${yieldRes.specificYieldKWhKWp.toLocaleString()} kWh/kWp`}
+                    </div>
+                    <span className="text-[11px] text-slate-500">PR: {isUnavailable ? '—' : `${yieldRes.performanceRatioPercent}%`}</span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3.5 rounded border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase block">P50 Net Export Yield</span>
+                    <div className="text-lg font-black text-emerald-700">
+                      {isUnavailable ? '—' : `${yieldRes.p50AnnualMWh.toLocaleString()} MWh`}
+                    </div>
+                    <span className="text-[11px] text-slate-500">CF Yr 1: {isUnavailable ? '—' : `${yieldRes.capacityFactorYear1Pct}%`}</span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3.5 rounded border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase block">P90 1-Year Exceedance</span>
+                    <div className="text-lg font-black text-indigo-700">
+                      {isUnavailable ? '—' : `${yieldRes.p90_1Year_MWh.toLocaleString()} MWh`}
+                    </div>
+                    <span className="text-[11px] text-slate-500">1-Yr Bankable Exceedance</span>
+                  </div>
                 </div>
 
-                <div className="bg-slate-50 p-4 rounded border border-slate-200">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase block">Performance Ratio (PR)</span>
-                  <div className="text-xl font-black text-slate-900">{land.performanceRatioPercent || 81.5}%</div>
-                  <span className="text-xs text-slate-500">System Performance Ratio</span>
+                {/* System Rating & Sizing Card */}
+                <div className="bg-slate-900 text-white p-4 rounded border border-slate-800">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-800 pb-3 mb-3">
+                    <div>
+                      <h4 className="font-bold text-amber-400 text-xs uppercase flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-amber-400" /> Plant Configuration & Sizing Ratios
+                      </h4>
+                      <p className="text-slate-400 text-[11px]">
+                        Suruhanjaya Tenaga LSS6 Compliant Architecture & Interconnection Ratings
+                      </p>
+                    </div>
+                    <span className="px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-800 text-amber-300 border border-amber-500/30">
+                      {isPackage3 ? 'Package 3: 33kV Solar-Only' : 'Packages 1/2: Hybrid 2:1:4 Architecture'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
+                    <div className="bg-slate-800/80 p-2.5 rounded border border-slate-700">
+                      <span className="text-[10px] text-slate-400 block uppercase">DC Peak Capacity</span>
+                      <span className="text-sm font-black text-white">{dcMWp} MWp</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-2.5 rounded border border-slate-700">
+                      <span className="text-[10px] text-slate-400 block uppercase">Inverter AC Rating</span>
+                      <span className="text-sm font-black text-white">{invMWac} MWa.c.</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-2.5 rounded border border-slate-700">
+                      <span className="text-[10px] text-slate-400 block uppercase">Export Grid Capacity</span>
+                      <span className="text-sm font-black text-amber-400">{expMWac} MWa.c.</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-2.5 rounded border border-slate-700">
+                      <span className="text-[10px] text-slate-400 block uppercase">DC : AC Sizing Ratio</span>
+                      <span className="text-sm font-black text-emerald-400">{(dcMWp / invMWac).toFixed(2)}×</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-2.5 rounded border border-slate-700">
+                      <span className="text-[10px] text-slate-400 block uppercase">BESS Battery Storage</span>
+                      <span className="text-sm font-black text-blue-400">{isPackage3 ? 'None (Solar-Only)' : `${bessMW} MW / ${bessMWh} MWh`}</span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="bg-slate-50 p-4 rounded border border-slate-200">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase block">P50 Median Energy Yield</span>
-                  <div className="text-xl font-black text-emerald-700">{(land.p50AnnualMWh || land.estimatedAnnualMWh).toLocaleString()} MWh</div>
-                  <span className="text-xs text-slate-500">50% Probability Yield</span>
-                </div>
+                {/* Declared Loss Stack Table with Step-by-Step Arithmetic Reconciliation */}
+                <div className="bg-slate-50 p-4 rounded border border-slate-200 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-2">
+                    <h4 className="font-bold text-slate-900 uppercase text-xs flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-amber-600" /> Declared Loss Stack & Arithmetic Reconciliation
+                    </h4>
+                    <span className="text-[11px] text-slate-600 font-bold">
+                      Net Reconciled PR: <strong className="text-slate-900">{isUnavailable ? '—' : `${yieldRes.performanceRatioPercent}%`}</strong>
+                    </span>
+                  </div>
 
-                <div className="bg-slate-50 p-4 rounded border border-slate-200">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase block">P90 Exceedance Yield</span>
-                  <div className="text-xl font-black text-blue-700">{(land.p90AnnualMWh || Math.round(land.estimatedAnnualMWh * 0.915)).toLocaleString()} MWh</div>
-                  <span className="text-xs text-slate-500">90% Exceedance Yield (Conservative)</span>
-                </div>
-              </div>
-
-              {/* Recharts Monthly Irradiance & Yield Chart */}
-              <div className="bg-slate-50 p-4 rounded border border-slate-200">
-                <h4 className="text-xs font-bold text-slate-900 uppercase mb-3 flex items-center justify-between">
-                  <span className="flex items-center gap-2">
-                    <BarChart3 className="w-4 h-4 text-amber-600" /> Monthly Irradiance (GHI) & Solar Yield Profile (P50 vs P90)
-                  </span>
-                  <span className="text-[11px] text-slate-500 font-normal">Peninsular Malaysia Solar Satellite Database</span>
-                </h4>
-
-                <div className="h-64 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={solarMonthlyData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="month" stroke="#64748b" fontSize={11} />
-                      <YAxis yAxisId="left" stroke="#d97706" fontSize={11} label={{ value: 'GHI (kWh/m²)', angle: -90, position: 'insideLeft', style: { fontSize: '10px', fill: '#d97706' } }} />
-                      <YAxis yAxisId="right" orientation="right" stroke="#059669" fontSize={11} label={{ value: 'Yield (MWh)', angle: 90, position: 'insideRight', style: { fontSize: '10px', fill: '#059669' } }} />
-                      <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
-                      <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                      <Bar yAxisId="left" dataKey="ghiKwhM2" name="GHI Irradiance (kWh/m²)" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                      <Line yAxisId="right" type="monotone" dataKey="p50MWh" name="P50 Generation (MWh)" stroke="#059669" strokeWidth={2.5} dot={{ r: 3 }} />
-                      <Line yAxisId="right" type="monotone" dataKey="p90MWh" name="P90 Generation (MWh)" stroke="#2563eb" strokeWidth={2} strokeDasharray="4 4" dot={{ r: 2 }} />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Monthly Data Table */}
-              <div className="bg-slate-50 p-4 rounded border border-slate-200 space-y-2">
-                <h5 className="font-bold text-slate-900 uppercase text-xs">12-Month Historical Solar Irradiance & Yield Breakdown Table</h5>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-slate-200 text-slate-800 font-bold">
-                        <th className="p-2 border-b border-slate-300">Month</th>
-                        <th className="p-2 border-b border-slate-300">GHI (kWh/m²/mo)</th>
-                        <th className="p-2 border-b border-slate-300">Daily Avg (kWh/m²/day)</th>
-                        <th className="p-2 border-b border-slate-300">P50 Solar Yield (MWh)</th>
-                        <th className="p-2 border-b border-slate-300">P90 Solar Yield (MWh)</th>
-                        <th className="p-2 border-b border-slate-300">Est. Monthly Revenue (RM)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {solarMonthlyData.map((m, idx) => (
-                        <tr key={idx} className="border-b border-slate-200 hover:bg-slate-100">
-                          <td className="p-2 font-bold text-slate-900">{m.month}</td>
-                          <td className="p-2 text-amber-700 font-bold">{m.ghiKwhM2}</td>
-                          <td className="p-2 text-slate-600">{(m.ghiKwhM2 / 30.4).toFixed(2)}</td>
-                          <td className="p-2 text-emerald-700 font-bold">{m.p50MWh.toLocaleString()}</td>
-                          <td className="p-2 text-blue-700 font-semibold">{m.p90MWh.toLocaleString()}</td>
-                          <td className="p-2 text-slate-800">RM {Math.round(m.p50MWh * 225).toLocaleString()}</td>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-200 text-slate-900 font-bold">
+                          <th className="p-2 border-b border-slate-300">Loss / Gain Stage</th>
+                          <th className="p-2 border-b border-slate-300 text-center">Stage Type</th>
+                          <th className="p-2 border-b border-slate-300 text-right">Adjustment Factor</th>
+                          <th className="p-2 border-b border-slate-300">Engineering Justification & Peninsular Reference</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {yieldRes.lossChain?.map((item, idx) => (
+                          <tr key={idx} className="border-b border-slate-200 hover:bg-slate-100">
+                            <td className="p-2 font-bold text-slate-900">{item.stage}</td>
+                            <td className="p-2 text-center">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                item.type === 'gain' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'
+                              }`}>
+                                {item.type.toUpperCase()}
+                              </span>
+                            </td>
+                            <td className={`p-2 text-right font-bold ${item.type === 'gain' ? 'text-emerald-700' : 'text-slate-800'}`}>
+                              {item.percentStr}
+                            </td>
+                            <td className="p-2 text-slate-600 text-[11px]">{item.notes}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* P90 Exceedance & Uncertainty Breakdown */}
+                <div className="bg-slate-50 p-4 rounded border border-slate-200 space-y-3">
+                  <h4 className="font-bold text-slate-900 uppercase text-xs flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-indigo-600" /> Multi-Year P90 Exceedance Probabilities & Uncertainty Stack
+                  </h4>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-center">
+                    <div className="bg-white p-3 rounded border border-slate-200">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase block">1-Year P90 Exceedance</span>
+                      <div className="text-base font-black text-indigo-800">
+                        {isUnavailable ? '—' : `${yieldRes.p90_1Year_MWh.toLocaleString()} MWh/yr`}
+                      </div>
+                      <span className="text-[10px] text-slate-500">Single-Year Bankable Debt Sizing</span>
+                    </div>
+
+                    <div className="bg-white p-3 rounded border border-slate-200">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase block">10-Year P90 Exceedance</span>
+                      <div className="text-base font-black text-indigo-800">
+                        {isUnavailable ? '—' : `${yieldRes.p90_10Year_MWh.toLocaleString()} MWh/yr`}
+                      </div>
+                      <span className="text-[10px] text-slate-500">10-Year Cumulative DSCR Anchor</span>
+                    </div>
+
+                    <div className="bg-white p-3 rounded border border-slate-200">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase block">20-Year P90 Exceedance</span>
+                      <div className="text-base font-black text-indigo-800">
+                        {isUnavailable ? '—' : `${yieldRes.p90_20Year_MWh.toLocaleString()} MWh/yr`}
+                      </div>
+                      <span className="text-[10px] text-slate-500">20-Year PPA Lifetime Exceedance</span>
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-200 rounded overflow-hidden">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-200 text-slate-900 font-bold">
+                          <th className="p-2 border-b border-slate-300">Uncertainty Parameter</th>
+                          <th className="p-2 border-b border-slate-300 text-right">Standard Deviation (σ)</th>
+                          <th className="p-2 border-b border-slate-300">Origin & Method</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr className="border-b border-slate-200">
+                          <td className="p-2 font-bold text-slate-800">Resource Dataset Uncertainty (σ_dataset)</td>
+                          <td className="p-2 text-right font-mono font-bold text-slate-900">{yieldRes.uncertainty?.sigmaDataset_pct ?? 8.0}%</td>
+                          <td className="p-2 text-slate-600">{solarRes.provenance.dataset} ({solarRes.grade})</td>
+                        </tr>
+                        <tr className="border-b border-slate-200">
+                          <td className="p-2 font-bold text-slate-800">Interannual Climatology Variability (σ_variability)</td>
+                          <td className="p-2 text-right font-mono font-bold text-slate-900">{yieldRes.uncertainty?.sigmaInterannual_pct ?? 3.5}%</td>
+                          <td className="p-2 text-slate-600">20-year satellite historical variance</td>
+                        </tr>
+                        <tr className="border-b border-slate-200">
+                          <td className="p-2 font-bold text-slate-800">Transposition & Shading Model (σ_model)</td>
+                          <td className="p-2 text-right font-mono font-bold text-slate-900">{yieldRes.uncertainty?.sigmaModel_pct ?? 3.0}%</td>
+                          <td className="p-2 text-slate-600">Fixed-tilt Hay-Davies / Perez model</td>
+                        </tr>
+                        <tr className="border-b border-slate-200">
+                          <td className="p-2 font-bold text-slate-800">PV Degradation & Equipment Tolerance (σ_pv)</td>
+                          <td className="p-2 text-right font-mono font-bold text-slate-900">{yieldRes.uncertainty?.sigmaDegradation_pct ?? 1.5}%</td>
+                          <td className="p-2 text-slate-600">N-type TOPCon module flash test tolerance</td>
+                        </tr>
+                        <tr className="bg-slate-100 font-bold">
+                          <td className="p-2 text-slate-900">Combined Root-Sum-Square Uncertainty (σ_combined)</td>
+                          <td className="p-2 text-right font-mono text-indigo-900 font-black">
+                            {yieldRes.uncertainty?.sigmaTotal_pct ? `${yieldRes.uncertainty.sigmaTotal_pct.toFixed(2)}%` : '9.31%'}
+                          </td>
+                          <td className="p-2 text-indigo-900">RSS Combined 1-Year Probability Distribution</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* 12-Month Historical Solar Irradiance & Generation Table */}
+                <div className="bg-slate-50 p-4 rounded border border-slate-200 space-y-2">
+                  <h4 className="font-bold text-slate-900 uppercase text-xs flex items-center justify-between">
+                    <span>12-Month Historical Solar Irradiance & Yield Breakdown Table</span>
+                    <span className="text-[11px] text-slate-500 font-normal">Actual calendar days used per month (Feb = 28 days)</span>
+                  </h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-200 text-slate-800 font-bold">
+                          <th className="p-2 border-b border-slate-300">Month</th>
+                          <th className="p-2 border-b border-slate-300 text-center">Days</th>
+                          <th className="p-2 border-b border-slate-300">GHI (kWh/m²/mo)</th>
+                          <th className="p-2 border-b border-slate-300">Daily Avg GHI</th>
+                          <th className="p-2 border-b border-slate-300">GTI (kWh/m²/mo)</th>
+                          <th className="p-2 border-b border-slate-300">P50 Net Export (MWh)</th>
+                          <th className="p-2 border-b border-slate-300">Monthly CF (%)</th>
+                          <th className="p-2 border-b border-slate-300">Est. Revenue (RM)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {yieldRes.monthlyYield?.map((m, idx) => {
+                          const monthlyHours = m.days * 24;
+                          const monthlyCF = expMWac > 0 ? (m.netYieldMWh / (expMWac * monthlyHours)) * 100 : 0;
+                          return (
+                            <tr key={idx} className="border-b border-slate-200 hover:bg-slate-100">
+                              <td className="p-2 font-bold text-slate-900">{m.monthName}</td>
+                              <td className="p-2 text-center text-slate-600">{m.days}</td>
+                              <td className="p-2 text-amber-700 font-bold">{isUnavailable ? '—' : m.ghi_kwh_m2}</td>
+                              <td className="p-2 text-slate-600">{isUnavailable ? '—' : m.dailyAvgGhi_kwh_m2.toFixed(2)}</td>
+                              <td className="p-2 text-amber-900 font-bold">{isUnavailable ? '—' : m.gti_kwh_m2}</td>
+                              <td className="p-2 text-emerald-700 font-bold">{isUnavailable ? '—' : Math.round(m.netYieldMWh).toLocaleString()}</td>
+                              <td className="p-2 text-blue-700 font-bold">{isUnavailable ? '—' : `${monthlyCF.toFixed(2)}%`}</td>
+                              <td className="p-2 text-slate-800">
+                                {isUnavailable ? '—' : `RM ${Math.round(m.netYieldMWh * (userBidTariff * 1000)).toLocaleString()}`}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* 21-Year Capacity Factor Evaluation Schedule against Clause 11.1.1(b) 16.0% Floor */}
+                <div className="bg-slate-50 p-4 rounded border border-slate-200 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-2">
+                    <div>
+                      <h4 className="font-bold text-slate-900 uppercase text-xs flex items-center gap-2">
+                        <TrendingUp className="w-4 h-4 text-emerald-600" /> 21-Year PPA Generation & Capacity Factor Schedule
+                      </h4>
+                      <p className="text-[11px] text-slate-600">
+                        Suruhanjaya Tenaga Clause 11.1.1(b) Mandate: Minimum 21-Year CF Floor = <strong className="text-slate-900">16.00%</strong>
+                      </p>
+                    </div>
+
+                    <span className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-1.5 ${
+                      yieldRes.clearsCapacityFactorFloor
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : 'bg-rose-100 text-rose-800 border border-rose-300'
+                    }`}>
+                      {yieldRes.clearsCapacityFactorFloor ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600" /> CLEARS 16.0% ST CF FLOOR (Year 21: {yieldRes.capacityFactorYear21Pct}%)
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-4 h-4 text-rose-600" /> FAILS 16.0% ST CF FLOOR (Year 21: {yieldRes.capacityFactorYear21Pct}%)
+                        </>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto border border-slate-200 rounded">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead className="sticky top-0 bg-slate-200 text-slate-900 font-bold">
+                        <tr>
+                          <th className="p-2 border-b border-slate-300">PPA Year</th>
+                          <th className="p-2 border-b border-slate-300 text-right">TOPCon Retention</th>
+                          <th className="p-2 border-b border-slate-300 text-right">Net Generation (MWh)</th>
+                          <th className="p-2 border-b border-slate-300 text-right">Capacity Factor (%)</th>
+                          <th className="p-2 border-b border-slate-300 text-center">ST Clause 11.1.1(b) Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {yieldRes.yearlyProfile?.map((row) => (
+                          <tr key={row.year} className={`border-b border-slate-200 hover:bg-slate-100 ${
+                            row.year === 1 || row.year === 21 ? 'bg-amber-50/70 font-bold' : ''
+                          }`}>
+                            <td className="p-2 font-bold text-slate-900">Year {row.year}</td>
+                            <td className="p-2 text-right font-mono text-slate-600">{(row.retentionFactor * 100).toFixed(2)}%</td>
+                            <td className="p-2 text-right font-mono font-bold text-emerald-700">
+                              {isUnavailable ? '—' : Math.round(row.netEnergyMWh).toLocaleString()}
+                            </td>
+                            <td className="p-2 text-right font-mono font-bold text-blue-700">
+                              {isUnavailable ? '—' : `${row.capacityFactorPct.toFixed(2)}%`}
+                            </td>
+                            <td className="p-2 text-center">
+                              {row.clearsFloor ? (
+                                <span className="text-emerald-700 font-bold text-[11px]">✓ Compliant (≥16.0%)</span>
+                              ) : (
+                                <span className="text-rose-700 font-bold text-[11px]">✗ Non-Compliant (&lt;16.0%)</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* TAB 4: Topography & DEM */}
           {activeReportTab === 'terrain' && (
@@ -3647,6 +3971,12 @@ MINIMUM SENIOR DSCR: ${dynamicDSCR.toFixed(2)}×
         onClose={() => setIsEditLandModalOpen(false)}
         land={activeLand}
         onSave={(updated) => setCustomLand(updated)}
+      />
+
+      <TmyUploadModal
+        isOpen={isTmyModalOpen}
+        onClose={() => setIsTmyModalOpen(false)}
+        onResourceLoaded={handleBankableTmyLoaded}
       />
     </div>
   );

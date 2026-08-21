@@ -1,3 +1,6 @@
+import { SolarResource } from './services/solarResource';
+import { YieldResult } from './services/yieldEngine';
+
 export type VoltageLevel = '33kV' | '132kV' | '275kV';
 
 export type StateName =
@@ -183,6 +186,8 @@ export interface LandParcel {
   estimatedCapExMyr: number; // MYR Million
   interconnectionCostMyr: number; // MYR Million
   annualCarbonOffsetTonnes: number; // Tonnes CO2e avoided per year
+  solarResource?: SolarResource;
+  yieldResult?: YieldResult;
   notes: string;
 }
 
@@ -232,6 +237,8 @@ export interface CustomLocationAnalysis {
   lcoeMyrKwh: number;
   irrPercent: number;
   overallScore: number;
+  solarResource?: SolarResource;
+  yieldResult?: YieldResult;
 }
 
 export interface FeasibilityReportData {

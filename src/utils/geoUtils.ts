@@ -5,6 +5,36 @@ import {
   getDegradationRetentionFactor,
   getYear21RetentionFactor,
 } from './projectFinance';
+import { SolarResource, fetchSolarResource, createUnavailableSolarResource } from '../services/solarResource';
+import { calculateYield, PlantConfig, YieldResult } from '../services/yieldEngine';
+
+export { calculateYield } from '../services/yieldEngine';
+export { fetchSolarResource } from '../services/solarResource';
+
+/**
+ * Estimated annual and daily GHI for Peninsular Malaysia coordinates (screening default)
+ */
+export function getEstimatedSolarGHI(lat: number, state?: string): { ghiYear: number; ghiDay: number } {
+  const stateGHI: Record<string, number> = {
+    Perlis: 1720,
+    Kedah: 1680,
+    'P. Pinang': 1660,
+    Kelantan: 1650,
+    Terengganu: 1640,
+    Perak: 1610,
+    Pahang: 1600,
+    Selangor: 1580,
+    'Kuala Lumpur': 1580,
+    Putrajaya: 1580,
+    'N. Sembilan': 1570,
+    Melaka: 1560,
+    Johor: 1550,
+  };
+  const base = state && stateGHI[state] ? stateGHI[state] : 1550 + Math.max(0, (lat - 1.5) * 35);
+  const ghiYear = Math.round(base);
+  const ghiDay = Math.round((ghiYear / 365.25) * 100) / 100;
+  return { ghiYear, ghiDay };
+}
 
 /**
  * Calculates straight-line Haversine distance in kilometers between two GPS points
@@ -85,34 +115,6 @@ export function calculateInterconnectionCostMyr(
 }
 
 /**
- * Estimates solar GHI (Global Horizontal Irradiation) based on Malaysian State Latitude
- * Northern Peninsular (Perlis, Kedah) has higher GHI (~1800-1950 kWh/m²/yr)
- * Eastern Peninsular (Kelantan, Terengganu, Pahang) ~1650-1800 kWh/m²/yr
- * Southern/Central (Johor, Melaka, Selangor, Perak, Kuala Lumpur) ~1550-1700 kWh/m²/yr
- */
-export function getEstimatedSolarGHI(lat: number, state: string): { ghiYear: number; ghiDay: number } {
-  let baseGHI = 1650;
-  if (state === 'Perlis' || state === 'Kedah') {
-    baseGHI = 1880 + (lat - 5.5) * 40;
-  } else if (state === 'P. Pinang') {
-    baseGHI = 1800;
-  } else if (state === 'Kelantan' || state === 'Terengganu') {
-    baseGHI = 1750;
-  } else if (state === 'Pahang') {
-    baseGHI = 1680;
-  } else if (state === 'Perak') {
-    baseGHI = 1660;
-  } else if (state === 'Selangor' || state === 'N. Sembilan' || state === 'Melaka' || state === 'Kuala Lumpur') {
-    baseGHI = 1630;
-  } else if (state === 'Johor') {
-    baseGHI = 1600;
-  }
-  const ghiYear = Math.round(baseGHI);
-  const ghiDay = Math.round((ghiYear / 365) * 100) / 100;
-  return { ghiYear, ghiDay };
-}
-
-/**
  * Calculates Solar PV System Metrics under ST RFP LSS6-Hybrid 2:1:4 Architecture
  * - Solar Facility (MWa.c.) = 2 x Export Capacity (MWa.c.)
  * - Solar PV DC Peak Capacity (MWp) = 1.25 x Solar Facility (MWa.c.)
@@ -143,19 +145,17 @@ export function calculateSolarCapacityFromLand(acres: number): {
 }
 
 /**
- * Calculates Annual Net Export Energy Yield (MWh/year) & Capacity Factor (CF) from first principles
- * C-10: Computes gross yield − clipping loss − (BESS-cycled energy × (1 − RTE)) − auxiliary load.
- * C-11: Applies unified degradation model.
- * Clause 11.1.1(b) Mandate: Minimum CF in any year over 21 years shall NOT be less than 16.0%
+ * Evaluates solar yield using the consolidated calculateYield engine
  */
 export function calculateAnnualYieldMWh(
   capacityMWp: number,
-  ghiYear: number = 1655,
+  ghiYear: number = 1800,
   exportCapacityMWa: number = capacityMWp / 2.5,
   rte: number = RFP_BENCHMARKS.bessRoundTripEfficiency,
   clippingRatio: number = RFP_BENCHMARKS.clippingLossRatio,
   auxRatio: number = RFP_BENCHMARKS.auxiliaryLossRatio,
-  isPackage3SolarOnly: boolean = false
+  isPackage3SolarOnly: boolean = false,
+  resource?: SolarResource
 ): {
   annualMWh: number;
   grossSolarMWh: number;
@@ -165,57 +165,61 @@ export function calculateAnnualYieldMWh(
   capacityFactorYear1: number;
   capacityFactorYear21: number;
   clearsCapacityFactorFloor: boolean;
+  yieldResult?: YieldResult;
 } {
-  // Single-axis horizontal tracking (+9% gain) + TOPCon bifacial modules (+7% gain)
-  const trackerGain = 1.09;
-  const bifacialGain = 1.07;
-  const performanceRatio = 0.840; // String inverters, high-albedo ground cover
+  const effectiveResource: SolarResource = resource || {
+    latitude: 4.5,
+    longitude: 102.0,
+    annualGHI_kwh_m2: ghiYear,
+    monthly: [
+      { month: 1, ghi_kwh_m2: Math.round(ghiYear * 0.088), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.088 / 31) * 100) / 100 },
+      { month: 2, ghi_kwh_m2: Math.round(ghiYear * 0.092), days: 28, dailyAvg_kwh_m2: Math.round((ghiYear * 0.092 / 28) * 100) / 100 },
+      { month: 3, ghi_kwh_m2: Math.round(ghiYear * 0.095), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.095 / 31) * 100) / 100 },
+      { month: 4, ghi_kwh_m2: Math.round(ghiYear * 0.091), days: 30, dailyAvg_kwh_m2: Math.round((ghiYear * 0.091 / 30) * 100) / 100 },
+      { month: 5, ghi_kwh_m2: Math.round(ghiYear * 0.085), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.085 / 31) * 100) / 100 },
+      { month: 6, ghi_kwh_m2: Math.round(ghiYear * 0.080), days: 30, dailyAvg_kwh_m2: Math.round((ghiYear * 0.080 / 30) * 100) / 100 },
+      { month: 7, ghi_kwh_m2: Math.round(ghiYear * 0.081), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.081 / 31) * 100) / 100 },
+      { month: 8, ghi_kwh_m2: Math.round(ghiYear * 0.084), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.084 / 31) * 100) / 100 },
+      { month: 9, ghi_kwh_m2: Math.round(ghiYear * 0.083), days: 30, dailyAvg_kwh_m2: Math.round((ghiYear * 0.083 / 30) * 100) / 100 },
+      { month: 10, ghi_kwh_m2: Math.round(ghiYear * 0.082), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.082 / 31) * 100) / 100 },
+      { month: 11, ghi_kwh_m2: Math.round(ghiYear * 0.073), days: 30, dailyAvg_kwh_m2: Math.round((ghiYear * 0.073 / 30) * 100) / 100 },
+      { month: 12, ghi_kwh_m2: Math.round(ghiYear * 0.066), days: 31, dailyAvg_kwh_m2: Math.round((ghiYear * 0.066 / 31) * 100) / 100 },
+    ],
+    grade: 'SCREENING',
+    provenance: {
+      dataset: 'NASA POWER v9.0 Climatology (SSE-RE)',
+      resolution: '0.5° x 0.625° (~55 km)',
+      periodOfRecord: '1984-2023 (40-Year Climatology)',
+      datasetUncertainty_pct: 8.0,
+      retrievedAt: new Date().toISOString(),
+      biasCorrection: 'None applied',
+    },
+    warnings: ['Screening estimate from reanalysis data. Commission site-specific resource data before proceeding.'],
+  };
 
-  // Specific yield Year 1 (kWh/kWp)
-  const specificYieldKWhKWp = (ghiYear / 1000) * trackerGain * bifacialGain * performanceRatio * 1000;
-  
-  // Gross solar energy yield at inverter transformer terminals (MWh)
-  const grossSolarMWh = (capacityMWp * 1000 * specificYieldKWhKWp) / 1000;
-  
-  // 1. Clipping losses
-  const clippingLossMWh = grossSolarMWh * clippingRatio;
+  const plantConfig: PlantConfig = {
+    dcCapacityMWp: capacityMWp,
+    inverterCapacityMWac: isPackage3SolarOnly ? exportCapacityMWa : exportCapacityMWa * 2,
+    exportCapacityMWac: exportCapacityMWa,
+    bessPowerMW: isPackage3SolarOnly ? 0 : exportCapacityMWa,
+    bessEnergyMWh: isPackage3SolarOnly ? 0 : exportCapacityMWa * 4,
+    isPackage3SolarOnly,
+    bessRoundTripEfficiency: rte,
+    auxiliaryLossRatio: auxRatio,
+  };
 
-  // 2. BESS Round-Trip Losses (Only for Hybrid plants with 4-hour BESS)
-  // Daily cycled energy = 4 hours * exportCapacityMWa * 1 cycle/day
-  let bessLossMWh = 0;
-  if (!isPackage3SolarOnly && exportCapacityMWa > 0) {
-    const bessEnergyMWh = exportCapacityMWa * 4;
-    const annualCycledEnergyMWh = bessEnergyMWh * 365;
-    bessLossMWh = annualCycledEnergyMWh * (1.0 - rte);
-  }
-
-  // 3. Plant Auxiliary Load Consumption
-  const auxLoadMWh = grossSolarMWh * auxRatio;
-
-  // First-principles Net Export Energy Yield (MWh)
-  const netExportMWh = Math.max(0, grossSolarMWh - clippingLossMWh - bessLossMWh - auxLoadMWh);
-  const annualMWh = Math.round(netExportMWh);
-
-  // RFP Clause 11.1.1(a) Capacity Factor calculation on rated kWp (d.c.) basis
-  // CF = Annual Net Export Energy (kWh) / (8,760 h * rated peak capacity kWp)
-  const capacityFactorYear1 = Math.round(((netExportMWh * 1000) / (capacityMWp * 1000 * 8760)) * 10000) / 100;
-  
-  // Year 21 Capacity Factor at unified TOPCon degradation (Retention ~89.95%) (C-11)
-  const yr21Retention = getYear21RetentionFactor();
-  const capacityFactorYear21 = Math.round((capacityFactorYear1 * yr21Retention) * 100) / 100;
-
-  // Clause 11.1.1(b) Mandatory floor is 16.0% in every single year of 21 years
-  const clearsCapacityFactorFloor = capacityFactorYear21 >= RFP_PACKAGES.PACKAGE_1.capacityFactorFloorPercent;
+  const yieldRes = calculateYield(effectiveResource, plantConfig);
 
   return {
-    annualMWh,
-    grossSolarMWh: Math.round(grossSolarMWh),
-    clippingLossMWh: Math.round(clippingLossMWh),
-    bessLossMWh: Math.round(bessLossMWh),
-    auxLoadMWh: Math.round(auxLoadMWh),
-    capacityFactorYear1,
-    capacityFactorYear21,
-    clearsCapacityFactorFloor,
+    annualMWh: yieldRes.p50AnnualMWh,
+    grossSolarMWh: yieldRes.grossSolarMWhYear1,
+    clippingLossMWh: yieldRes.clippingLossMWhYear1,
+    bessLossMWh: yieldRes.bessLossMWhYear1,
+    auxLoadMWh: yieldRes.auxLoadMWhYear1,
+    capacityFactorYear1: yieldRes.capacityFactorYear1Pct,
+    capacityFactorYear21: yieldRes.capacityFactorYear21Pct,
+    clearsCapacityFactorFloor: yieldRes.clearsCapacityFactorFloor,
+    yieldResult: yieldRes,
   };
 }
 
@@ -546,23 +550,26 @@ export function analyzeCustomLandPlot(
   lat: number,
   lng: number,
   areaAcres: number,
-  allNodes: PMUNode[]
+  allNodes: PMUNode[],
+  resource?: SolarResource
 ): CustomLocationAnalysis {
   const { nearest, distanceKm, secondNearest, secondDistanceKm } = findNearestPMU(lat, lng, allNodes);
   const cableRouteKm = estimateCableRouteKm(distanceKm);
   const suggestedVoltage: VoltageLevel = nearest.voltage;
   const is33kV = suggestedVoltage === '33kV';
 
-  const { ghiYear, ghiDay } = getEstimatedSolarGHI(lat, nearest.state);
   const { exportCapacityMWa, capacityMWp } = calculateSolarCapacityFromLand(areaAcres);
-  const { annualMWh, clearsCapacityFactorFloor } = calculateAnnualYieldMWh(
+  
+  const defaultAnnualGhi = resource?.annualGHI_kwh_m2 ?? 1800;
+  const { annualMWh, clearsCapacityFactorFloor, yieldResult } = calculateAnnualYieldMWh(
     capacityMWp,
-    ghiYear,
+    defaultAnnualGhi,
     exportCapacityMWa,
     RFP_BENCHMARKS.bessRoundTripEfficiency,
     RFP_BENCHMARKS.clippingLossRatio,
     RFP_BENCHMARKS.auxiliaryLossRatio,
-    is33kV
+    is33kV,
+    resource
   );
 
   const fin = is33kV
@@ -573,11 +580,14 @@ export function analyzeCustomLandPlot(
   const terrainSlope: number | null = null;
   const terrainCategory: 'Unsurveyed' = 'Unsurveyed';
 
+  const actualGhiYear = resource?.annualGHI_kwh_m2 ?? defaultAnnualGhi;
+  const actualGhiDay = Math.round((actualGhiYear / 365) * 100) / 100;
+
   // Feasibility Score formulation (0 - 100)
   // Distance score: 100 if <2km, minus 6 pts per km
   const distanceScore = Math.max(0, 100 - distanceKm * 6);
   // Solar score: 100 if >1800 ghi, 70 if 1600
-  const solarScore = Math.min(100, Math.max(50, ((ghiYear - 1500) / 350) * 50 + 50));
+  const solarScore = Math.min(100, Math.max(50, ((actualGhiYear - 1500) / 350) * 50 + 50));
   // Grid capacity match score
   const capacityMatchScore = nearest.capacityMW >= exportCapacityMWa ? 95 : 60;
 
@@ -601,8 +611,8 @@ export function analyzeCustomLandPlot(
     secondDistanceKm: secondDistanceKm,
     estimatedCableLengthKm: cableRouteKm,
     suggestedVoltage,
-    ghiKwhM2Year: ghiYear,
-    ghiKwhM2Day: ghiDay,
+    ghiKwhM2Year: actualGhiYear,
+    ghiKwhM2Day: actualGhiDay,
     maxSolarCapacityMW: capacityMWp,
     terrainSlope,
     terrainCategory,
@@ -617,5 +627,7 @@ export function analyzeCustomLandPlot(
     lcoeMyrKwh: fin.lcoeMyrKwh,
     irrPercent: fin.irrPercent,
     overallScore,
+    solarResource: resource,
+    yieldResult,
   };
 }

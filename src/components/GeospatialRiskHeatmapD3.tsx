@@ -93,7 +93,7 @@ export const GeospatialRiskHeatmapD3: React.FC<GeospatialRiskHeatmapD3Props> = (
   const nodeRiskData = useMemo(() => {
     return nodes.map((node) => {
       // 1. Land Cost Risk: Based on average land cost per acre in node parcels or state benchmarks
-      const landCosts = node.landParcels.map((l) => l.estimatedLandCostPerAcreMyr);
+      const landCosts = (node.landParcels || []).map((l) => l.estimatedLandCostPerAcreMyr);
       const avgLandCost =
         landCosts.length > 0
           ? landCosts.reduce((a, b) => a + b, 0) / landCosts.length
@@ -117,8 +117,8 @@ export const GeospatialRiskHeatmapD3: React.FC<GeospatialRiskHeatmapD3Props> = (
       );
 
       // 3. Flood & Topo Risk: High flood risk or steep terrain
-      const highFloodParcels = node.landParcels.filter((l) => l.floodRisk === 'High').length;
-      const floodRisk = highFloodParcels > 0 ? 85 : node.landParcels.some((l) => l.floodRisk === 'Moderate') ? 45 : 15;
+      const highFloodParcels = (node.landParcels || []).filter((l) => l.floodRisk === 'High').length;
+      const floodRisk = highFloodParcels > 0 ? 85 : (node.landParcels || []).some((l) => l.floodRisk === 'Moderate') ? 45 : 15;
 
       // 4. Composite Risk Index
       const compositeRisk = Math.round(landCostRisk * 0.45 + gridClearanceRisk * 0.45 + floodRisk * 0.10);

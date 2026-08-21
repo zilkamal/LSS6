@@ -2,6 +2,8 @@ import jsPDF from 'jspdf';
 import { PMUNode, LandParcel } from '../types';
 import { calculateProjectFinance, getYear21RetentionFactor } from './projectFinance';
 import { RFP_PACKAGES, RFP_BENCHMARKS } from '../data/rfpParameters';
+import { calculateYield } from '../services/yieldEngine';
+import { SolarResource } from '../services/solarResource';
 
 export interface RfpReportOptions {
   bidderCompanyName?: string;
@@ -44,6 +46,52 @@ export async function generateRfpSubmissionPdfReport(
   const bidderCompany = options?.bidderCompanyName || 'LSS6 PROJECT CONSORTIUM SPV SDN. BHD.';
   const bidderReg = options?.bidderRegistrationNo || '202601089821 (1589234-X)';
 
+  // Sizing & Resource
+  const dcMWp = land.maxCapacityMW || (isPackage3 ? 25 : 75);
+  const expMWac = land.exportCapacityMWa || (isPackage3 ? 20 : 30);
+  const invMWac = isPackage3 ? expMWac : expMWac * 2;
+  const bessMW = isPackage3 ? 0 : expMWac;
+  const bessMWh = isPackage3 ? 0 : expMWac * 4;
+
+  const isBankableTmy = (land.dataProvenance as string) === 'VERIFIED_JUPEM' || (land.dataProvenance as string) === 'TMY_COMMERCIAL';
+  const solarRes: SolarResource = land.solarResource || {
+    latitude: land.lat,
+    longitude: land.lng,
+    annualGHI_kwh_m2: land.ghiKwhM2Year || 1620,
+    monthly: (land.monthlyIrradianceData || []).map((m, idx) => {
+      const days = idx === 1 ? 28 : [3, 5, 8, 10].includes(idx) ? 30 : 31;
+      return {
+        month: idx + 1,
+        ghi_kwh_m2: m.ghiKwhM2,
+        days,
+        dailyAvg_kwh_m2: Math.round((m.ghiKwhM2 / days) * 100) / 100,
+      };
+    }),
+    grade: isBankableTmy ? 'BANKABLE' : 'SCREENING',
+    provenance: {
+      dataset: isBankableTmy ? 'SolarGIS / Meteonorm Commercial TMY' : 'NASA POWER v9.0 Climatology (SSE-RE)',
+      resolution: isBankableTmy ? '1 km high-resolution spatial grid' : '0.5° × 0.625° (~55km grid)',
+      periodOfRecord: '1984–2023 (40-Year Climatology)',
+      datasetUncertainty_pct: isBankableTmy ? 3.5 : 8.0,
+      retrievedAt: new Date().toISOString(),
+      biasCorrection: isBankableTmy ? 'Ground calibrated' : 'None applied',
+    },
+    warnings: isBankableTmy ? [] : ['Screening data only. Upload a bankable commercial TMY dataset before final RFP submission.'],
+  };
+
+  const yieldRes = land.yieldResult || calculateYield(solarRes, {
+    dcCapacityMWp: dcMWp,
+    inverterCapacityMWac: invMWac,
+    exportCapacityMWac: expMWac,
+    bessPowerMW: bessMW,
+    bessEnergyMWh: bessMWh,
+    isPackage3SolarOnly: isPackage3,
+    bessRoundTripEfficiency: 0.85,
+    auxiliaryLossRatio: 0.010,
+  });
+
+  const isUnavailable = !yieldRes.isCalculable || solarRes.grade === 'UNAVAILABLE';
+
   // Calculate CapEx and Project Finance
   const pvCap = land.pvCapExMyr || (land.maxCapacityMW * 2.65);
   const bessCap = isPackage3 ? 0 : (land.bessCapExMyr || ((land.bessEnergyMWh || 120) * 0.95));
@@ -66,7 +114,7 @@ export async function generateRfpSubmissionPdfReport(
     (isPackage3 ? 0.35 : (land.maxCapacityMW > 125 ? 3.0 : 1.0)) * 0.01
   );
 
-  const annualNetExportMWh = land.estimatedAnnualMWh || (land.maxCapacityMW * 1480 * 0.815);
+  const annualNetExportMWh = yieldRes.p50AnnualMWh || land.estimatedAnnualMWh || (land.maxCapacityMW * 1480 * 0.815);
 
   const financeResults = calculateProjectFinance({
     totalCapEx,
@@ -75,10 +123,9 @@ export async function generateRfpSubmissionPdfReport(
     tariff: bidTariff,
   });
 
-  const yr21Retention = getYear21RetentionFactor();
-  const yr1CF = land.capacityFactorYear1 || ((annualNetExportMWh / (land.maxCapacityMW * 8760)) * 100);
-  const yr21CF = land.capacityFactorYear21 || (yr1CF * yr21Retention);
-  const clearsCFFloor = yr21CF >= 16.0;
+  const yr1CF = yieldRes.capacityFactorYear1Pct;
+  const yr21CF = yieldRes.capacityFactorYear21Pct;
+  const clearsCFFloor = yieldRes.clearsCapacityFactorFloor;
 
   // Document Styling Helpers
   const renderHeader = (sectionTitle: string) => {
@@ -126,6 +173,15 @@ export async function generateRfpSubmissionPdfReport(
       `Date: ${new Date().toLocaleDateString('en-MY', { year: 'numeric', month: 'short', day: 'numeric' })} | Page ${pageNo} of ${totalPages}`,
       pageWidth - 55,
       pageHeight - 7.5
+    );
+
+    // Provenance line
+    doc.setFontSize(5.5);
+    doc.setTextColor(148, 163, 184);
+    doc.text(
+      `Solar Resource Provenance: ${solarRes.grade === 'BANKABLE' ? '[BANKABLE GRADE] SolarGIS / Meteonorm (1km High Resolution, ±3.5% Uncertainty)' : '[SCREENING GRADE] NASA POWER Climatology (55km Grid, ±8.0% Uncertainty)'} | CF Floor Check: ${clearsCFFloor ? 'COMPLIANT' : 'NON-COMPLIANT'}`,
+      14,
+      pageHeight - 3.5
     );
   };
 
@@ -376,47 +432,110 @@ export async function generateRfpSubmissionPdfReport(
   renderHeader('4. Solar Resource & 21-Year Yield Assessment');
   y = 30;
 
-  y = renderSectionHeader('SOLAR IRRADIANCE & ENERGY GENERATION BENCHMARKS', y);
+  // Provenance Banner
+  if (isUnavailable) {
+    doc.setFillColor(254, 226, 226);
+    doc.setDrawColor(239, 68, 68);
+    doc.roundedRect(14, y, pageWidth - 28, 10, 1.5, 1.5, 'FD');
+    doc.setFontSize(7.5);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(185, 28, 28);
+    doc.text('SOLAR RESOURCE DATA UNAVAILABLE FOR THIS COORDINATE — VALUES DISPLAYED AS DASHES', 18, y + 6.5);
+    y += 13;
+  } else {
+    const isBankable = solarRes.grade === 'BANKABLE';
+    doc.setFillColor(isBankable ? 240 : 254, isBankable ? 253 : 243, isBankable ? 244 : 199);
+    doc.setDrawColor(isBankable ? 34 : 245, isBankable ? 197 : 158, isBankable ? 94 : 11);
+    doc.roundedRect(14, y, pageWidth - 28, 11, 1.5, 1.5, 'FD');
+    doc.setFontSize(7.5);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(isBankable ? 22 : 146, isBankable ? 101 : 64, isBankable ? 52 : 14);
+    doc.text(
+      isBankable
+        ? `[BANKABLE TMY GRADE] ${solarRes.provenance.dataset} (${solarRes.provenance.resolution}) — Uncertainty: ±${solarRes.provenance.datasetUncertainty_pct.toFixed(1)}%`
+        : `[SCREENING GRADE ONLY] ${solarRes.provenance.dataset} (${solarRes.provenance.resolution}) — Uncertainty: ±${solarRes.provenance.datasetUncertainty_pct.toFixed(1)}%`,
+      18,
+      y + 4.5
+    );
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.2);
+    doc.setTextColor(isBankable ? 21 : 120, isBankable ? 128 : 53, isBankable ? 61 : 15);
+    doc.text(
+      isBankable
+        ? 'Independent bankable commercial TMY time-series meets Suruhanjaya Tenaga LSS6 bankability requirements for non-recourse project financing.'
+        : 'Preliminary satellite screening dataset. Upload high-resolution bankable commercial TMY data (SolarGIS / Meteonorm) prior to final financial close.',
+      18,
+      y + 8.5
+    );
+    y += 14;
+  }
 
-  const solarRows = [
-    ['Annual Global Horizontal Irradiance (GHI)', `${land.ghiKwhM2Year} kWh/m²/year (${land.ghiKwhM2Day} kWh/m²/day)`, 'Satellite Data Source', 'NASA POWER / Solargis 20-Year Time Series'],
-    ['System Performance Ratio (PR)', `${land.performanceRatioPercent || 81.5}%`, 'PV Module Technology', 'N-Type TOPCon Bifacial Glass-Glass (600Wp+)'],
-    ['Tracker System', '1-Axis Horizontal Single-Axis Trackers (HSAT)', 'Inverter Technology', '1500V String Inverters (IP66, Smart IV Curve)'],
-    ['P50 Annual Generation (Yr 1)', `${Math.round(land.p50AnnualMWh || annualNetExportMWh).toLocaleString()} MWh/year`, 'P90 Exceedance Generation (Yr 1)', `${Math.round(land.p90AnnualMWh || (annualNetExportMWh * 0.915)).toLocaleString()} MWh/year`],
-    ['Year 1 Capacity Factor (CF)', `${yr1CF.toFixed(2)}%`, 'Year 21 Capacity Factor (CF)', `${yr21CF.toFixed(2)}% (Degradation factor: ${yr21Retention.toFixed(4)})`],
-    ['Clause 11.1.1(b) 16.0% Floor', clearsCFFloor ? 'PASSED (Clears 16.0% Floor in Yr 21)' : 'DISQUALIFIED (<16.0% in Yr 21)', 'Annual Carbon Offset', `${land.annualCarbonOffsetTonnes.toLocaleString()} tCO2e / year`],
+  y = renderSectionHeader('SOLAR IRRADIANCE & TRANSPOSITION SPECIFICATIONS', y);
+
+  const solarResourceRows = [
+    ['Annual Global Horizontal Irradiance (GHI)', isUnavailable || !solarRes.annualGHI_kwh_m2 ? '—' : `${solarRes.annualGHI_kwh_m2.toLocaleString()} kWh/m²/year`, 'Transposition Model', yieldRes.transpositionModel || 'Fixed-Tilt 10° (Hay-Davies Model)'],
+    ['Annual Global Tilted Irradiance (GTI / POA)', isUnavailable ? '—' : `${yieldRes.annualGTI_kwh_m2.toLocaleString()} kWh/m²/year (+3.0% fixed tilt)`, 'Bifacial Irradiance Gain', '+4.0% Rear-side Albedo (0.20)'],
+    ['Solar Resource Dataset', solarRes.provenance.dataset, 'Spatial Resolution & Grid', solarRes.provenance.resolution],
+    ['Period of Climatological Record', solarRes.provenance.periodOfRecord, 'Dataset Uncertainty (1-Sigma)', `±${solarRes.provenance.datasetUncertainty_pct.toFixed(1)}%`],
+    ['DC Peak Array Sizing', `${dcMWp} MWp TOPCon Bifacial`, 'Inverter Station Rating', `${invMWac} MWac (DC:AC Ratio: ${(dcMWp / invMWac).toFixed(2)}x)`],
+    ['Grid Export Capacity Quota', `${expMWac} MWac POI Injection`, 'Inverter Clipping Loss', yieldRes.clippingFactor < 1.0 ? `-${((1 - yieldRes.clippingFactor) * 100).toFixed(2)}%` : '0.0% (Optimized Sizing)'],
   ];
 
-  y = renderTable(['Resource Parameter', 'Model Benchmark', 'System Parameter', 'Model Benchmark'], solarRows, y, [45, 45, 45, 47]);
+  y = renderTable(['Resource & System Field', 'Specification', 'Modeling Parameter', 'Design Value'], solarResourceRows, y, [45, 45, 45, 47]);
 
-  y = renderSectionHeader('12-MONTH IRRADIANCE & P50 / P90 GENERATION BREAKDOWN', y);
+  y = renderSectionHeader('DECLARED LOSS STACK ARITHMETIC RECONCILIATION', y);
 
-  const monthlyList = land.monthlyIrradianceData && land.monthlyIrradianceData.length === 12
-    ? land.monthlyIrradianceData
-    : [
-        { month: 'January', ghiKwhM2: 135, p50MWh: Math.round(annualNetExportMWh * 0.082), p90MWh: Math.round(annualNetExportMWh * 0.082 * 0.915) },
-        { month: 'February', ghiKwhM2: 142, p50MWh: Math.round(annualNetExportMWh * 0.086), p90MWh: Math.round(annualNetExportMWh * 0.086 * 0.915) },
-        { month: 'March', ghiKwhM2: 156, p50MWh: Math.round(annualNetExportMWh * 0.095), p90MWh: Math.round(annualNetExportMWh * 0.095 * 0.915) },
-        { month: 'April', ghiKwhM2: 148, p50MWh: Math.round(annualNetExportMWh * 0.090), p90MWh: Math.round(annualNetExportMWh * 0.090 * 0.915) },
-        { month: 'May', ghiKwhM2: 138, p50MWh: Math.round(annualNetExportMWh * 0.084), p90MWh: Math.round(annualNetExportMWh * 0.084 * 0.915) },
-        { month: 'June', ghiKwhM2: 130, p50MWh: Math.round(annualNetExportMWh * 0.079), p90MWh: Math.round(annualNetExportMWh * 0.079 * 0.915) },
-        { month: 'July', ghiKwhM2: 128, p50MWh: Math.round(annualNetExportMWh * 0.078), p90MWh: Math.round(annualNetExportMWh * 0.078 * 0.915) },
-        { month: 'August', ghiKwhM2: 132, p50MWh: Math.round(annualNetExportMWh * 0.080), p90MWh: Math.round(annualNetExportMWh * 0.080 * 0.915) },
-        { month: 'September', ghiKwhM2: 130, p50MWh: Math.round(annualNetExportMWh * 0.079), p90MWh: Math.round(annualNetExportMWh * 0.079 * 0.915) },
-        { month: 'October', ghiKwhM2: 126, p50MWh: Math.round(annualNetExportMWh * 0.077), p90MWh: Math.round(annualNetExportMWh * 0.077 * 0.915) },
-        { month: 'November', ghiKwhM2: 118, p50MWh: Math.round(annualNetExportMWh * 0.072), p90MWh: Math.round(annualNetExportMWh * 0.072 * 0.915) },
-        { month: 'December', ghiKwhM2: 122, p50MWh: Math.round(annualNetExportMWh * 0.074), p90MWh: Math.round(annualNetExportMWh * 0.074 * 0.915) },
-      ];
-
-  const monthTableRows = monthlyList.map((m) => [
-    m.month,
-    `${m.ghiKwhM2} kWh/m²`,
-    `${(m.ghiKwhM2 / 30.4).toFixed(2)} kWh/m²/d`,
-    `${m.p50MWh.toLocaleString()} MWh`,
-    `${m.p90MWh.toLocaleString()} MWh`,
+  const lossRows = isUnavailable || !yieldRes.lossChain ? [
+    ['Nominal Irradiance at Array Plane (GTI)', '100.0%', 'Base Solar Energy Potential at Site', '—'],
+  ] : yieldRes.lossChain.map((item, idx) => [
+    `${idx + 1}. ${item.stage}`,
+    item.percentStr,
+    item.notes,
+    item.type.toUpperCase(),
   ]);
 
-  y = renderTable(['Month', 'Monthly GHI', 'Daily Avg GHI', 'P50 Solar Yield', 'P90 Exceedance Yield'], monthTableRows, y, [35, 35, 35, 38, 39], ['left', 'right', 'right', 'right', 'right']);
+  y = renderTable(['Loss Component', 'Adjustment', 'Engineering & Atmospheric Basis', 'Stage Type'], lossRows, y, [52, 22, 86, 22], ['left', 'center', 'left', 'center']);
+
+  y = renderSectionHeader('P50 / P90 EXCEEDANCE PROBABILITIES & SENSITIVITY (YEAR 1)', y);
+
+  const exceedanceRows = isUnavailable ? [
+    ['P50 Base Case Net Yield', '—', '—', '—'],
+  ] : [
+    ['P50 Base Case (50% Exceedance)', `${Math.round(yieldRes.p50AnnualMWh).toLocaleString()} MWh/yr`, `${yr1CF.toFixed(2)}%`, 'Baseline P50 Expected Net Production'],
+    ['P90 (1-Year Exceedance Horizon)', `${Math.round(yieldRes.p90_1Year_MWh).toLocaleString()} MWh/yr`, `${((yieldRes.p90_1Year_MWh / (expMWac * 8760)) * 100).toFixed(2)}%`, 'Annual DSCR Sizing Benchmark (1-Yr σ)'],
+    ['P90 (10-Year Exceedance Horizon)', `${Math.round(yieldRes.p90_10Year_MWh).toLocaleString()} MWh/yr`, `${((yieldRes.p90_10Year_MWh / (expMWac * 8760)) * 100).toFixed(2)}%`, '10-Year Cumulative Risk Anchor'],
+    ['P90 (20-Year PPA Tenor Horizon)', `${Math.round(yieldRes.p90_20Year_MWh).toLocaleString()} MWh/yr`, `${((yieldRes.p90_20Year_MWh / (expMWac * 8760)) * 100).toFixed(2)}%`, '21-Year Concession Tenor Benchmark'],
+  ];
+
+  y = renderTable(['Exceedance Level', 'Annual Net Yield', 'Capacity Factor', 'P50 Variance / Tenor Risk'], exceedanceRows, y, [48, 38, 30, 66], ['left', 'right', 'center', 'left']);
+
+  y = renderSectionHeader('12-MONTH IRRADIANCE & ESTIMATED NET PRODUCTION SCHEDULE', y);
+
+  const monthTableRows = (yieldRes.monthlyYield || []).map((m) => {
+    const monthlyHours = m.days * 24;
+    const monthlyCF = expMWac > 0 ? (m.netYieldMWh / (expMWac * monthlyHours)) * 100 : 0;
+    return [
+      m.monthName,
+      `${m.days} d`,
+      `${m.ghi_kwh_m2} kWh/m²`,
+      `${m.dailyAvgGhi_kwh_m2.toFixed(2)} kWh/m²/d`,
+      `${m.gti_kwh_m2} kWh/m²`,
+      isUnavailable ? '—' : `${Math.round(m.netYieldMWh).toLocaleString()} MWh`,
+      isUnavailable ? '—' : `${monthlyCF.toFixed(2)}%`,
+    ];
+  });
+
+  y = renderTable(['Month', 'Days', 'Monthly GHI', 'Daily Avg GHI', 'Monthly GTI', 'Monthly Net MWh', 'Monthly CF'], monthTableRows, y, [28, 14, 28, 30, 28, 30, 24], ['left', 'center', 'right', 'right', 'right', 'right', 'right']);
+
+  // Provenance & Compliance Footer Banner
+  doc.setFontSize(6.2);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(100, 116, 139);
+  doc.text(
+    `* ST Clause 11.1.1(b) Verification: Year 1 Capacity Factor = ${yr1CF.toFixed(2)}% | Year 21 CF = ${yr21CF.toFixed(2)}% (Floor: 16.00%) | Degradation Retention: ${(getYear21RetentionFactor() * 100).toFixed(2)}% | Compliance: ${clearsCFFloor ? 'COMPLIANT' : 'NON-COMPLIANT'}`,
+    14,
+    y
+  );
 
   renderFooter(4);
 

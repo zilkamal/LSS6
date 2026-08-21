@@ -41,6 +41,13 @@ The platform provides comprehensive site feasibility screening across **48 Penin
 - **Bid Bond (Tender Guarantee)**: **RM 1,000,000.00**
 - **Substitute Bond**: **RM 5,000,000.00** (submitted within 14 days of PPA execution)
 
+### Package 3: Distribution Level Solar Scale (Bumiputera Gateway)
+- **LSS Export Capacity**: 10 MWa.c. up to 30 MWa.c. (Total Procurement: **150 MWa.c.**)
+- **Co-Located BESS**: **Not Required** (100% direct grid export)
+- **Interconnection Level**: 33 kV Distribution Network across 60 designated substation points
+- **Equity Requirement**: Minimum **100% Bumiputera Equity Ownership**
+- **EPC Benchmark**: ~ RM 2.45 Million / MWp (Solar EPC Only)
+
 ---
 
 ## 📅 Official Procurement Schedule & Critical Milestones

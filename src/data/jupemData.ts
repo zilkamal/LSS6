@@ -419,7 +419,21 @@ export function convertLandParcelToJupemZone(land: LandParcel, pmuNodeName: stri
     permissibilityBadge = 'emerald';
   }
 
-  const coords: [number, number][] = (land.gpsPolygon || []).map((pt) => [pt.lat, pt.lng]);
+  let coords: [number, number][] = [];
+  if (Array.isArray(land.gpsPolygon) && land.gpsPolygon.length >= 3) {
+    coords = land.gpsPolygon
+      .filter((pt) => typeof pt.lat === 'number' && !isNaN(pt.lat) && typeof pt.lng === 'number' && !isNaN(pt.lng))
+      .map((pt) => [pt.lat, pt.lng]);
+  }
+  
+  if (coords.length < 3 && typeof land.lat === 'number' && !isNaN(land.lat) && typeof land.lng === 'number' && !isNaN(land.lng)) {
+    coords = [
+      [land.lat + 0.003, land.lng - 0.003],
+      [land.lat + 0.003, land.lng + 0.003],
+      [land.lat - 0.003, land.lng + 0.003],
+      [land.lat - 0.003, land.lng - 0.003],
+    ];
+  }
 
   const stateCodeMap: Record<string, string> = {
     Kedah: 'KD',
